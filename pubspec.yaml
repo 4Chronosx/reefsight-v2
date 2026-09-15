@@ -21,6 +21,20 @@ version: 1.0.0+1
 environment:
   sdk: ^3.10.7
 
+# dartcv4 (opencv_dart's native binding layer) only compiles `imgproc`/
+# `imgcodecs` by default — calib3d and video are excluded unless requested
+# here. The CMC port (mobile/lib/tracking/camera_motion_compensation.dart)
+# needs estimateAffinePartial2D (calib3d) and calcOpticalFlowPyrLK (video);
+# without this, those calls compile but throw "symbol not found" at runtime.
+hooks:
+  user_defines:
+    dartcv4:
+      include_modules:
+        - imgcodecs
+        - imgproc
+        - calib3d
+        - video
+
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
 # consider running `flutter pub upgrade --major-versions`. Alternatively,
@@ -37,6 +51,7 @@ dependencies:
   ultralytics_yolo: ^0.6.14
   camera: ^0.12.0+2
   image: ^4.10.1
+  opencv_dart: ^2.2.2
 
 dev_dependencies:
   flutter_test:
