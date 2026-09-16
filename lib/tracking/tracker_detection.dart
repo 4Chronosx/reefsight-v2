@@ -8,6 +8,7 @@ class TrackerDetection {
     required this.x2,
     required this.y2,
     required this.score,
+    this.payload,
   }) : assert(
           x2 > x1 && y2 > y1,
           'TrackerDetection must have a positive width and height — a '
@@ -25,6 +26,11 @@ class TrackerDetection {
 
   /// Detection confidence in `[0, 1]`.
   final double score;
+
+  /// Caller-supplied data (e.g. this frame's mask + crop-classify health)
+  /// carried opaquely through the tracker. See [STrack.payload] for how it
+  /// survives matching.
+  final Object? payload;
 
   double get width => x2 - x1;
   double get height => y2 - y1;

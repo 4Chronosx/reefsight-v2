@@ -7,7 +7,7 @@ import 'track_state.dart';
 /// `features`/`update_features`) removed — this port has no appearance
 /// embeddings (see `ReefSight_Development_Plan.md` Track 2).
 class STrack {
-  STrack(this._tlwh, this.score);
+  STrack(this._tlwh, this.score, {this.payload});
 
   static int _nextId = 1;
 
@@ -18,6 +18,14 @@ class STrack {
 
   final List<double> _tlwh;
   double score;
+
+  /// Caller-supplied data (e.g. a mask + crop-classify health) carried
+  /// through from whichever detection last matched this track. Copied on
+  /// [update] and [reActivate] the same way [score] is; a freshly
+  /// [activate]d track already has it from construction, since the STrack
+  /// being activated is itself the detection wrapper. `null` if the track
+  /// was never matched to a detection carrying a payload.
+  Object? payload;
 
   int trackId = 0;
   bool isActivated = false;
@@ -88,6 +96,7 @@ class STrack {
     this.frameId = frameId;
     if (newId) trackId = _nextId++;
     score = newTrack.score;
+    payload = newTrack.payload;
   }
 
   /// Folds a matched detection into this track.
@@ -98,6 +107,7 @@ class STrack {
     state = TrackState.tracked;
     isActivated = true;
     score = newTrack.score;
+    payload = newTrack.payload;
   }
 
   void markLost() => state = TrackState.lost;

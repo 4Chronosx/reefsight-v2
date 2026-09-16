@@ -52,6 +52,17 @@ dependencies:
   camera: ^0.12.0+2
   image: ^4.10.1
   opencv_dart: ^2.2.2
+  path_provider: ^2.1.5
+
+# Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
+# isolation"): the published plugin's VideoCapture owns the only
+# AVCaptureSession and exposes no recording API. This override patches in an
+# AVCaptureMovieFileOutput as a second output on that same session -- see
+# third_party/ultralytics_yolo/PATCH.md for the exact diff, kept small and
+# isolated so it's mechanical to re-apply after an upstream version bump.
+dependency_overrides:
+  ultralytics_yolo:
+    path: third_party/ultralytics_yolo
 
 dev_dependencies:
   flutter_test:

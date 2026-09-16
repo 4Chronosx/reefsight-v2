@@ -9,6 +9,14 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Vendored ultralytics_yolo fork (sub-plan 3 task 1, see
+    # third_party/ultralytics_yolo/PATCH.md) -- its example/ and
+    # test_driver/ dirs have their own unresolved dependencies (share_plus,
+    # image_picker, integration_test) that aren't part of this app.
+    - third_party/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

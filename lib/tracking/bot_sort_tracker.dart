@@ -84,7 +84,7 @@ class BoTSortTracker {
     }
 
     final detectionTracks = [
-      for (final d in highDets) STrack(d.tlwh, d.score),
+      for (final d in highDets) STrack(d.tlwh, d.score, payload: d.payload),
     ];
 
     final unconfirmed = <STrack>[];
@@ -137,7 +137,7 @@ class BoTSortTracker {
     }
 
     final secondDetectionTracks = [
-      for (final d in lowDets) STrack(d.tlwh, d.score),
+      for (final d in lowDets) STrack(d.tlwh, d.score, payload: d.payload),
     ];
     final remainingTracked = [
       for (final i in firstResult.unmatchedA)

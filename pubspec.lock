@@ -401,7 +401,7 @@ packages:
     source: hosted
     version: "1.9.1"
   path_provider:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: path_provider
       sha256: a7f4874f987173da295a61c181b8ee71dab59b332a486b391babf26a1b884825
@@ -624,10 +624,9 @@ packages:
   ultralytics_yolo:
     dependency: "direct main"
     description:
-      name: ultralytics_yolo
-      sha256: "3848bc0cb1fa8726e59f15c402a3044f55b20b864fb7965c48910ffd79d2dea3"
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/ultralytics_yolo"
+      relative: true
+    source: path
     version: "0.6.14"
   url_launcher:
     dependency: transitive

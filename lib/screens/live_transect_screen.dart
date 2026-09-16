@@ -1,19 +1,35 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 import '../services/bleaching_classifier.dart';
+import '../services/colony_size.dart';
+import '../services/health_aggregator.dart';
 import '../services/model_assets.dart';
+import '../services/transect_recorder.dart';
+import '../tracking/bot_sort_tracker.dart';
+import '../tracking/strack.dart';
+import '../tracking/tracker_detection.dart';
 
-/// Live segmentation + crop-and-classify screen.
+/// Live segmentation + crop-classify + tracking screen (sub-plan 3:
+/// `mobile/sub-plans/03-crop-classify-and-tracking.md`).
 ///
-/// Wires the two models as independent pipelines: `YOLOView` streams
-/// `coralvos_primary` segmentation live (native overlay + `onStreamingData`),
-/// and a separate [BleachingClassifier] instance classifies a crop of the
-/// top detection per frame. There is no tracker here — that's sub-plan 3
-/// (`mobile/sub-plans/03-crop-classify-and-tracking.md`); this screen only
-/// has to prove the segment -> crop -> classify chain works end to end and
-/// that neither model blocks the other.
+/// Per frame: every segmentation box is classified (no longer just the top
+/// one -- that simplification was sub-plan 1's, before a tracker existed to
+/// give each detection a stable identity), then all of this frame's
+/// detections -- each carrying its own mask + health as an opaque payload --
+/// feed [BoTSortTracker.update]. There is no separate matching/alignment
+/// step: a detection's payload is exactly the mask/health that came from the
+/// same segmentation box the tracker is matching by geometry, so whichever
+/// output [STrack] a detection matches, its payload comes along for free
+/// (see `tracking/strack.dart`'s `payload` field).
+///
+/// Recording (sub-plan 3 step 1) runs through [TransectRecorder], wired to
+/// the forked `ultralytics_yolo` plugin's native recorder
+/// (`third_party/ultralytics_yolo`, see its `PATCH.md`) -- independent of
+/// this screen's classify/tracking logic, so a caught exception here can't
+/// stop the recording.
 class LiveTransectScreen extends StatefulWidget {
   const LiveTransectScreen({super.key});
 
@@ -21,33 +37,74 @@ class LiveTransectScreen extends StatefulWidget {
   State<LiveTransectScreen> createState() => _LiveTransectScreenState();
 }
 
+/// One frame's mask + health for a single detection, carried opaquely
+/// through the tracker via [TrackerDetection.payload] / [STrack.payload].
+class _DetectionPayload {
+  const _DetectionPayload({this.mask, this.health});
+
+  final List<List<double>>? mask;
+  final ColonyHealth? health;
+}
+
 class _LiveTransectScreenState extends State<LiveTransectScreen> {
   final _classifier = BleachingClassifier(
     modelAssetPath: ModelAssets.nmfsOsiBleachingClassifier,
   );
+  final _yoloController = YOLOViewController();
+  final _tracker = BoTSortTracker();
+  final _healthAggregator = HealthAggregator();
+  late final TransectRecorder _recorder;
 
-  // Compute-budget guard (Spec Open Item #1 / sub-plan's flagged risk): never
-  // let classify calls queue up behind the live segmentation stream. A frame
-  // is simply skipped for classification while the previous crop is still
-  // being classified.
-  bool _isClassifying = false;
+  // Compute-budget guard (Spec Open Item #1): never let a new frame's
+  // classify+track round start while the previous one is still running.
+  // Classifying every detection in a frame (not just the top one, now that
+  // there's a tracker to give each a stable identity) means this round's
+  // duration scales with detection count per frame -- acceptable for the
+  // sparse, non-overlapping colonies this project targets, but flagged here
+  // since it hasn't been stress-tested with many colonies in frame at once
+  // (Spec's "Open risk").
+  bool _isProcessing = false;
 
-  ColonyHealth? _latestHealth;
   double? _segProcessingMs;
-  int? _classifyLatencyMs;
+  List<STrack> _latestTracks = const [];
+  final Map<int, double> _latestSizePx = {};
   String? _segmentationError;
+  String? _recordingError;
 
   @override
   void initState() {
     super.initState();
+    _recorder = TransectRecorder(
+      startRecording: _yoloController.startRecording,
+      stopRecording: _yoloController.stopRecording,
+    );
     _classifier.load().catchError((Object error) {
       debugPrint('ReefSight: classifier failed to load: $error');
     });
+    _startRecording();
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      final documentsDir = await getApplicationDocumentsDirectory();
+      await _recorder.start(documentsDir.path);
+    } catch (error) {
+      debugPrint('ReefSight: failed to start recording: $error');
+      if (mounted) setState(() => _recordingError = error.toString());
+    }
   }
 
   @override
   void dispose() {
-    _classifier.dispose();
+    // Fire-and-forget: dispose() can't be async. Errors are logged, not
+    // surfaced to UI that's about to be torn down anyway.
+    _recorder.stop().catchError((Object error) {
+      debugPrint('ReefSight: failed to stop recording: $error');
+    });
+    _classifier.dispose().catchError((Object error) {
+      debugPrint('ReefSight: failed to dispose classifier: $error');
+    });
+    _yoloController.dispose();
     super.dispose();
   }
 
@@ -57,7 +114,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       setState(() => _segProcessingMs = segProcessingMs);
     }
 
-    if (_isClassifying) return;
+    if (_isProcessing) return;
 
     final detectionsRaw = event['detections'] as List<dynamic>?;
     final frameBytes = event['originalImage'] as Uint8List?;
@@ -71,42 +128,75 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       return;
     }
 
+    // TrackerDetection requires a strictly positive width/height (its own
+    // doc comment: a degenerate box reaches KalmanFilter.initiate() as zero
+    // variance and divides by zero in linalg.invert() instead of failing
+    // loudly) -- filtered here rather than trusted from the raw model
+    // output, since crop_geometry.dart's own floor/ceil clamping (used for
+    // the classify crop) doesn't apply to this raw float box.
     final detections = detectionsRaw
         .whereType<Map>()
         .map(YOLOResult.fromMap)
+        .where((r) => r.boundingBox.width > 0 && r.boundingBox.height > 0)
         .toList(growable: false);
     if (detections.isEmpty) return;
 
-    // Highest-confidence colony in this frame — no tracker yet to pick a
-    // stable target, so each frame independently classifies its best box.
-    final topDetection = detections.reduce(
-      (a, b) => b.confidence > a.confidence ? b : a,
-    );
-
-    _isClassifying = true;
-    final stopwatch = Stopwatch()..start();
+    _isProcessing = true;
     try {
-      final health = await _classifier.classifyCrop(
-        frameBytes,
-        topDetection.boundingBox,
-        frameWidth: frameWidth,
-        frameHeight: frameHeight,
-      );
-      stopwatch.stop();
-      if (!mounted) return;
-      setState(() {
-        _latestHealth = health;
-        _classifyLatencyMs = stopwatch.elapsedMilliseconds;
-      });
-      // Concurrency verification (sub-plan's "Done when" #3): actual timing
-      // numbers for both pipelines, not an eyeballed frame rate.
-      debugPrint(
-        'ReefSight perf: segmentation=${segProcessingMs?.toStringAsFixed(1)}ms '
-        'classify=${stopwatch.elapsedMilliseconds}ms '
-        'label=${health?.label} confidence=${health?.confidence}',
-      );
+      final trackerDetections = <TrackerDetection>[];
+      for (final result in detections) {
+        ColonyHealth? health;
+        try {
+          health = await _classifier.classifyCrop(
+            frameBytes,
+            result.boundingBox,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight,
+          );
+        } catch (error) {
+          debugPrint('ReefSight: classifyCrop failed for one detection: $error');
+        }
+        trackerDetections.add(
+          TrackerDetection(
+            x1: result.boundingBox.left,
+            y1: result.boundingBox.top,
+            x2: result.boundingBox.right,
+            y2: result.boundingBox.bottom,
+            score: result.confidence,
+            payload: _DetectionPayload(mask: result.mask, health: health),
+          ),
+        );
+      }
+
+      final tracks = _tracker.update(trackerDetections);
+
+      // Aggregator/size mutations happen inside the same setState block as
+      // the rebuild trigger so they stay atomic with what's displayed --
+      // splitting them (mutate, then separately setState) would let a
+      // future early-return between the two show stale data.
+      if (mounted) {
+        setState(() {
+          _latestTracks = tracks;
+          for (final track in tracks) {
+            final payload = track.payload;
+            if (payload is! _DetectionPayload) continue;
+
+            _healthAggregator.record(track.trackId, payload.health);
+
+            final mask = payload.mask;
+            if (mask != null) {
+              final box = track.tlwh;
+              _latestSizePx[track.trackId] = maskAreaPixels(
+                mask,
+                boxWidthPx: box[2],
+                boxHeightPx: box[3],
+              );
+            }
+          }
+        });
+      }
     } finally {
-      _isClassifying = false;
+      _isProcessing = false;
     }
   }
 
@@ -116,13 +206,18 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       body: Stack(
         children: [
           YOLOView(
+            controller: _yoloController,
             modelPath: ModelAssets.coralvosPrimarySegmentation,
             task: YOLOTask.segment,
             streamingConfig: const YOLOStreamingConfig.custom(
               includeOriginalImage: true,
+              // Per-instance masks (mask-derived size, sub-plan 3 task 6)
+              // are opt-in -- without this, YOLOResult.mask stays null.
+              includeMasks: true,
               // Caps both inference and how often a full camera frame is
-              // shipped over the platform channel — Spec's "Target: 5-8 fps"
-              // (ReefSight_Specification.md:88), not an arbitrary number.
+              // shipped over the platform channel -- Spec's "Target: 5-8
+              // fps" (ReefSight_Specification.md:88), not an arbitrary
+              // number.
               inferenceFrequency: 8,
             ),
             onStreamingData: _handleStreamingData,
@@ -141,11 +236,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
             left: 12,
             bottom: 12,
             child: SafeArea(
-              child: _PerformanceAndHealthOverlay(
+              child: _PerformanceAndTracksOverlay(
                 segProcessingMs: _segProcessingMs,
-                classifyLatencyMs: _classifyLatencyMs,
-                health: _latestHealth,
+                tracks: _latestTracks,
+                healthAggregator: _healthAggregator,
+                sizesPx: _latestSizePx,
                 segmentationError: _segmentationError,
+                recordingError: _recordingError,
               ),
             ),
           ),
@@ -155,18 +252,22 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   }
 }
 
-class _PerformanceAndHealthOverlay extends StatelessWidget {
-  const _PerformanceAndHealthOverlay({
+class _PerformanceAndTracksOverlay extends StatelessWidget {
+  const _PerformanceAndTracksOverlay({
     required this.segProcessingMs,
-    required this.classifyLatencyMs,
-    required this.health,
+    required this.tracks,
+    required this.healthAggregator,
+    required this.sizesPx,
     required this.segmentationError,
+    required this.recordingError,
   });
 
   final double? segProcessingMs;
-  final int? classifyLatencyMs;
-  final ColonyHealth? health;
+  final List<STrack> tracks;
+  final HealthAggregator healthAggregator;
+  final Map<int, double> sizesPx;
   final String? segmentationError;
+  final String? recordingError;
 
   @override
   Widget build(BuildContext context) {
@@ -182,21 +283,28 @@ class _PerformanceAndHealthOverlay extends StatelessWidget {
         children: [
           Text(
             'seg: ${segProcessingMs?.toStringAsFixed(1) ?? '--'}ms   '
-            'classify: ${classifyLatencyMs ?? '--'}ms',
+            'tracks: ${tracks.length}',
             style: const TextStyle(color: Colors.white70, fontSize: 12),
           ),
-          if (health != null)
+          for (final track in tracks)
             Text(
-              '${health!.label} (${(health!.confidence * 100).toStringAsFixed(1)}%)',
+              '#${track.trackId}: '
+              '${healthAggregator.currentLabel(track.trackId) ?? '--'} '
+              '(${sizesPx[track.trackId]?.toStringAsFixed(0) ?? '--'}px²)',
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 14,
+                fontSize: 13,
                 fontWeight: FontWeight.w600,
               ),
             ),
           if (segmentationError != null)
             Text(
               'Segmentation model error: $segmentationError',
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          if (recordingError != null)
+            Text(
+              'Recording error: $recordingError',
               style: const TextStyle(color: Colors.redAccent, fontSize: 12),
             ),
         ],
