@@ -21,11 +21,20 @@ class TransectDatabase {
   static const _sessionsTable = 'transect_sessions';
   static const _coloniesTable = 'tracked_colonies';
 
+  /// Bumped from 1 -> 2 when `site_name`/`observer_name` were added to
+  /// `transect_sessions` (sub-plan 5, task 2) -- `onCreate` only runs for a
+  /// brand-new database file, so any device with an existing
+  /// `reefsight.db` from before that change needs `onUpgrade` to actually
+  /// gain the new columns, or every subsequent `insertSession()` throws
+  /// `no such column: site_name`.
+  static const _schemaVersion = 2;
+
   static Future<TransectDatabase> open(String directory) async {
     final db = await openDatabase(
       p.join(directory, 'reefsight.db'),
-      version: 1,
+      version: _schemaVersion,
       onCreate: (db, version) => _createSchema(db),
+      onUpgrade: (db, oldVersion, newVersion) => _upgradeSchema(db, oldVersion),
       onOpen: (db) => db.execute('PRAGMA foreign_keys = ON'),
     );
     return TransectDatabase._(db);
@@ -43,7 +52,7 @@ class TransectDatabase {
   static Future<TransectDatabase> openInMemoryForTest() async {
     final db = await openDatabase(
       inMemoryDatabasePath,
-      version: 1,
+      version: _schemaVersion,
       singleInstance: false,
       onCreate: (db, version) => _createSchema(db),
       onOpen: (db) => db.execute('PRAGMA foreign_keys = ON'),
@@ -58,7 +67,9 @@ class TransectDatabase {
         started_at TEXT NOT NULL,
         ended_at TEXT,
         tape_length_meters REAL NOT NULL,
-        belt_width_meters REAL NOT NULL
+        belt_width_meters REAL NOT NULL,
+        site_name TEXT,
+        observer_name TEXT
       )
     ''');
     await db.execute('''
@@ -77,6 +88,18 @@ class TransectDatabase {
         UNIQUE(session_id, track_id)
       )
     ''');
+  }
+
+  /// Applies each version bump between [oldVersion] and [_schemaVersion] in
+  /// order -- currently only 1 -> 2 exists, adding `site_name`/
+  /// `observer_name`. Nullable `ALTER TABLE ... ADD COLUMN` is safe on
+  /// existing rows (they read back as `null`, matching
+  /// `TransectSession.fromMap`'s already-nullable handling of both).
+  static Future<void> _upgradeSchema(Database db, int oldVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN site_name TEXT');
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN observer_name TEXT');
+    }
   }
 
   Future<int> insertSession(TransectSession session) async {

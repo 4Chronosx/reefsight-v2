@@ -16,6 +16,8 @@ class TransectSession {
     this.endedAt,
     required this.tapeLengthMeters,
     this.beltWidthMeters = 1.0,
+    this.siteName,
+    this.observerName,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -29,12 +31,21 @@ class TransectSession {
   final double tapeLengthMeters;
   final double beltWidthMeters;
 
+  /// Diver-entered at transect setup (sub-plan 5's `TransectSetupScreen`),
+  /// same field as v1's `SurveyMetadata.siteName`/`.observerName` --
+  /// `null`, not a placeholder string, when never entered, so the report UI
+  /// can tell "not recorded" apart from an empty-string default.
+  final String? siteName;
+  final String? observerName;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
     DateTime? endedAt,
     double? tapeLengthMeters,
     double? beltWidthMeters,
+    String? siteName,
+    String? observerName,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -42,6 +53,8 @@ class TransectSession {
       endedAt: endedAt ?? this.endedAt,
       tapeLengthMeters: tapeLengthMeters ?? this.tapeLengthMeters,
       beltWidthMeters: beltWidthMeters ?? this.beltWidthMeters,
+      siteName: siteName ?? this.siteName,
+      observerName: observerName ?? this.observerName,
     );
   }
 
@@ -53,6 +66,8 @@ class TransectSession {
         'ended_at': endedAt?.toIso8601String(),
         'tape_length_meters': tapeLengthMeters,
         'belt_width_meters': beltWidthMeters,
+        'site_name': siteName,
+        'observer_name': observerName,
       };
 
   static TransectSession fromMap(Map<String, Object?> map) {
@@ -63,6 +78,8 @@ class TransectSession {
       endedAt: endedAtRaw == null ? null : DateTime.parse(endedAtRaw),
       tapeLengthMeters: (map['tape_length_meters'] as num).toDouble(),
       beltWidthMeters: (map['belt_width_meters'] as num).toDouble(),
+      siteName: map['site_name'] as String?,
+      observerName: map['observer_name'] as String?,
     );
   }
 }

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
+import '../constants/app_colors.dart';
 import '../services/bleaching_classifier.dart';
 import '../services/colony_size.dart';
 import '../services/health_aggregator.dart';
@@ -16,6 +17,7 @@ import '../services/transect_session.dart';
 import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
 import '../tracking/tracker_detection.dart';
+import 'summary_screen.dart';
 
 /// Live segmentation + crop-classify + tracking screen (sub-plan 3:
 /// `mobile/sub-plans/03-crop-classify-and-tracking.md`).
@@ -36,7 +38,21 @@ import '../tracking/tracker_detection.dart';
 /// this screen's classify/tracking logic, so a caught exception here can't
 /// stop the recording.
 class LiveTransectScreen extends StatefulWidget {
-  const LiveTransectScreen({super.key});
+  const LiveTransectScreen({
+    super.key,
+    required this.tapeLengthMeters,
+    this.siteName,
+    this.observerName,
+  });
+
+  /// Physical marked transect tape length, collected up front by
+  /// `TransectSetupScreen` (sub-plan 5) -- this screen no longer prompts
+  /// for it itself, since diving straight into the camera/segmentation view
+  /// before that's known left no natural place for a blocking dialog that
+  /// also felt right on a glove-operated touchscreen.
+  final double tapeLengthMeters;
+  final String? siteName;
+  final String? observerName;
 
   @override
   State<LiveTransectScreen> createState() => _LiveTransectScreenState();
@@ -86,6 +102,19 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   bool _disposed = false;
   Future<void>? _sessionStartFuture;
 
+  // Guards `_finalizeSession()` against running twice: the diver's explicit
+  // "End Transect" button (below) and `dispose()`'s own finalize chain can
+  // now both reach it (e.g. the button runs it, then the resulting
+  // `Navigator.pop`/screen teardown triggers `dispose()`, whose chain would
+  // otherwise re-run it). `TransectRecorder.stop()` is already idempotent
+  // (a no-op once stopped); this makes finalize idempotent the same way.
+  bool _finalized = false;
+
+  // Guards `_endTransect()` (below) against double-tap; also lets the UI
+  // show a busy state on the button.
+  bool _endingTransect = false;
+  String? _endTransectError;
+
   // Compute-budget guard (Spec Open Item #1): never let a new frame's
   // classify+track round start while the previous one is still running.
   // Classifying every detection in a frame (not just the top one, now that
@@ -117,8 +146,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     });
   }
 
-  /// Prompts for the physical transect tape's length, opens the on-device
-  /// DB, and inserts the session row -- then starts recording regardless of
+  /// Opens the on-device DB and inserts the session row (tape length +
+  /// site/observer metadata already collected by `TransectSetupScreen`
+  /// before this screen was pushed) -- then starts recording regardless of
   /// whether that succeeded, since recording (sub-plan 3) is deliberately
   /// independent of the storage layer's own failures.
   ///
@@ -129,79 +159,28 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   /// without setting `_db`/`_sessionId` would otherwise leak the DB handle
   /// and silently drop the session).
   Future<void> _startSession() async {
-    final tapeLengthMeters = await _promptTapeLengthMeters();
-    if (_disposed) return;
-
-    if (tapeLengthMeters != null) {
-      TransectDatabase? db;
-      try {
-        final documentsDir = await getApplicationDocumentsDirectory();
-        db = await TransectDatabase.open(documentsDir.path);
-        final sessionId = await db.insertSession(
-          TransectSession(
-            startedAt: DateTime.now().toUtc(),
-            tapeLengthMeters: tapeLengthMeters,
-          ),
-        );
-        _db = db;
-        _sessionId = sessionId;
-      } catch (error) {
-        await db?.close();
-        debugPrint('ReefSight: failed to start transect session: $error');
-        if (mounted) setState(() => _persistError = error.toString());
-      }
+    TransectDatabase? db;
+    try {
+      final documentsDir = await getApplicationDocumentsDirectory();
+      db = await TransectDatabase.open(documentsDir.path);
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.now().toUtc(),
+          tapeLengthMeters: widget.tapeLengthMeters,
+          siteName: widget.siteName,
+          observerName: widget.observerName,
+        ),
+      );
+      _db = db;
+      _sessionId = sessionId;
+    } catch (error) {
+      await db?.close();
+      debugPrint('ReefSight: failed to start transect session: $error');
+      if (mounted) setState(() => _persistError = error.toString());
     }
 
     if (_disposed) return;
     await _startRecording();
-  }
-
-  /// `null` if the diver dismissed the dialog without ever entering a valid
-  /// number -- the density denominator (`ReefSight_Specification.md`,
-  /// "Density, positioning, and sync") is the physical tape, so there's no
-  /// sensible default to fall back to. The dialog can't otherwise be
-  /// dismissed (`barrierDismissible: false`, no cancel button), and its
-  /// only button is disabled until the field parses as a positive number --
-  /// so `null` here means the screen was torn down while the dialog was
-  /// still open, not "diver chose not to enter one."
-  Future<double?> _promptTapeLengthMeters() async {
-    if (!mounted) return null;
-    final controller = TextEditingController(text: '10');
-    try {
-      return await showDialog<double>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (dialogContext, setDialogState) {
-            final parsed = double.tryParse(controller.text);
-            final isValid = parsed != null && parsed > 0;
-            return AlertDialog(
-              title: const Text('Transect tape length'),
-              content: TextField(
-                controller: controller,
-                autofocus: true,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(
-                  labelText: 'Length (meters)',
-                  errorText: isValid ? null : 'Enter a positive number',
-                ),
-                onChanged: (_) => setDialogState(() {}),
-              ),
-              actions: [
-                TextButton(
-                  onPressed:
-                      isValid ? () => Navigator.of(dialogContext).pop(parsed) : null,
-                  child: const Text('Start transect'),
-                ),
-              ],
-            );
-          },
-        ),
-      );
-    } finally {
-      controller.dispose();
-    }
   }
 
   Future<void> _startRecording() async {
@@ -249,6 +228,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   /// DB handle. A no-op if [_startSession] never got as far as opening a DB
   /// (e.g. the diver never entered a tape length).
   Future<void> _finalizeSession() async {
+    if (_finalized) return;
+    _finalized = true;
+
     final db = _db;
     final sessionId = _sessionId;
     if (db == null || sessionId == null) return;
@@ -282,6 +264,52 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       await db.closeSession(sessionId, DateTime.now().toUtc());
     } finally {
       await db.close();
+    }
+  }
+
+  /// Diver-initiated "End Transect" -- stops recording, finalizes and
+  /// closes the session (reusing [_finalizeSession], guarded against the
+  /// double-run `dispose()` would otherwise cause once this screen pops),
+  /// then hands off to [SummaryScreen] for the session just closed. Falls
+  /// back to a plain pop if no session was ever opened (e.g. storage
+  /// failed at start) -- there's nothing for Summary to load in that case.
+  ///
+  /// Awaits [_sessionStartFuture] first, exactly like `dispose()` does --
+  /// without this, tapping the button while `_startSession()` is still
+  /// mid-flight would read `_sessionId` as `null` (falling back to a plain
+  /// pop instead of opening Summary) *and* set [_finalized] before
+  /// `_startSession()` ever sets `_db`/`_sessionId`, so neither this call
+  /// nor `dispose()`'s own deferred finalize would ever persist the
+  /// session -- silent data loss, not a visible failure.
+  Future<void> _endTransect() async {
+    if (_endingTransect) return;
+    setState(() {
+      _endingTransect = true;
+      _endTransectError = null;
+    });
+
+    try {
+      await (_sessionStartFuture ?? Future.value());
+      final sessionId = _sessionId;
+      await _recorder.stop();
+      await _finalizeSession();
+
+      if (!mounted) return;
+      if (sessionId != null) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => SummaryScreen(sessionId: sessionId)),
+        );
+      } else {
+        Navigator.of(context).pop();
+      }
+    } catch (error) {
+      debugPrint('ReefSight: failed to end transect: $error');
+      if (mounted) {
+        setState(() {
+          _endingTransect = false;
+          _endTransectError = error.toString();
+        });
+      }
     }
   }
 
@@ -428,6 +456,119 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
                 recordingError: _recordingError,
                 persistError: _persistError,
               ),
+            ),
+          ),
+          // Running tally (Spec's "Live screen" line: "detection/
+          // segmentation overlay + a running tally (colonies seen,
+          // tentative healthy/bleached count)") -- distinct from the
+          // per-track debug overlay above.
+          Positioned(
+            top: 12,
+            right: 12,
+            child: SafeArea(
+              child: _TallyBadge(
+                seenCount: _firstSeenAt.length,
+                healthyCount: _firstSeenAt.keys
+                    .where((id) =>
+                        _healthAggregator.currentLabel(id) ==
+                        HealthAggregator.healthyLabel)
+                    .length,
+                bleachedCount: _firstSeenAt.keys
+                    .where((id) =>
+                        _healthAggregator.currentLabel(id) ==
+                        HealthAggregator.bleachedLabel)
+                    .length,
+              ),
+            ),
+          ),
+          // Large, glove-friendly tap target (DIVEVOLK SeaTouch housing,
+          // Spec's "Diver interaction" note) -- ends the transect and
+          // hands off to the report (SummaryScreen).
+          Positioned(
+            right: 12,
+            bottom: 12,
+            child: SafeArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (_endTransectError != null)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      constraints: const BoxConstraints(maxWidth: 220),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        'Failed to end transect: $_endTransectError',
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                      ),
+                    ),
+                  SizedBox(
+                    height: 56,
+                    child: ElevatedButton.icon(
+                      onPressed: _endingTransect ? null : _endTransect,
+                      icon: _endingTransect
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.stop_circle_outlined),
+                      label: Text(_endingTransect ? 'Ending...' : 'End Transect'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.bleached,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TallyBadge extends StatelessWidget {
+  const _TallyBadge({
+    required this.seenCount,
+    required this.healthyCount,
+    required this.bleachedCount,
+  });
+
+  final int seenCount;
+  final int healthyCount;
+  final int bleachedCount;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.grid_view_rounded, color: Colors.white70, size: 14),
+          const SizedBox(width: 6),
+          Text(
+            '$seenCount seen   ✓$healthyCount   ✗$bleachedCount',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],

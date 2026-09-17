@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
-import 'screens/live_transect_screen.dart';
+import 'constants/app_colors.dart';
+import 'constants/app_typography.dart';
+import 'screens/splash_screen.dart';
 
 void main() {
   runApp(const ReefSightApp());
@@ -11,10 +13,15 @@ class ReefSightApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final baseTheme = ThemeData(
+      colorScheme: ColorScheme.fromSeed(seedColor: AppColors.primary),
+    );
     return MaterialApp(
       title: 'ReefSight',
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal)),
-      home: const LiveTransectScreen(),
+      theme: baseTheme.copyWith(
+        textTheme: AppTypography.textTheme(baseTheme.textTheme),
+      ),
+      home: const SplashScreen(),
     );
   }
 }

@@ -40,6 +40,22 @@ void main() {
       expect(stored.beltWidthMeters, 1.0);
     });
 
+    test('insertSession round-trips siteName/observerName', () async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, 1),
+          tapeLengthMeters: 10,
+          siteName: 'Marigondon Reef',
+          observerName: 'C. Zaballa',
+        ),
+      );
+
+      final stored = await db.sessionById(id);
+
+      expect(stored!.siteName, 'Marigondon Reef');
+      expect(stored.observerName, 'C. Zaballa');
+    });
+
     test('closeSession sets endedAt', () async {
       final id = await db.insertSession(
         TransectSession(

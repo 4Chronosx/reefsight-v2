@@ -78,5 +78,28 @@ void main() {
 
       expect(restored.endedAt, isNull);
     });
+
+    test('siteName/observerName default to null and round-trip through the '
+        'map when set', () {
+      final withoutMetadata = TransectSession(
+        id: 1,
+        startedAt: DateTime.utc(2026, 1, 1),
+        tapeLengthMeters: 10,
+      );
+      expect(withoutMetadata.siteName, isNull);
+      expect(withoutMetadata.observerName, isNull);
+
+      final withMetadata = TransectSession(
+        id: 1,
+        startedAt: DateTime.utc(2026, 1, 1),
+        tapeLengthMeters: 10,
+        siteName: 'Marigondon Reef',
+        observerName: 'C. Zaballa',
+      );
+      final restored = TransectSession.fromMap(withMetadata.toMap());
+
+      expect(restored.siteName, 'Marigondon Reef');
+      expect(restored.observerName, 'C. Zaballa');
+    });
   });
 }
