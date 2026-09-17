@@ -54,6 +54,11 @@ dependencies:
   opencv_dart: ^2.2.2
   path_provider: ^2.1.5
 
+  # Sub-plan 4 (storage-and-metrics): on-device persistence for tracked
+  # colonies, per ReefSight_Specification.md "Storage" (`sqflite`, locked).
+  sqflite: ^2.4.1
+  path: ^1.9.0
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an
@@ -74,6 +79,11 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+
+  # sqflite has no platform channel under `flutter test` -- this FFI-backed
+  # implementation is the package's own documented way to exercise real
+  # SQLite (not a mock) from plain Dart tests. See test/flutter_test_config.dart.
+  sqflite_common_ffi: ^2.3.4+4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
