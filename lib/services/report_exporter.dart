@@ -82,4 +82,17 @@ class ReportExporter {
       text: 'Coral reef health survey report from ReefSight.',
     );
   }
+
+  /// Shares the continuous transect recording (`TransectRecorder`, via the
+  /// forked `ultralytics_yolo` plugin -- `mobile/third_party/ultralytics_yolo`'s
+  /// `PATCH.md`). [filePath] is `TransectSession.videoPath`, set at session
+  /// finalize; the caller is responsible for checking it's non-null and the
+  /// file still exists before calling this.
+  static Future<void> shareVideo(String filePath) async {
+    await Share.shareXFiles(
+      [XFile(filePath)],
+      subject: 'ReefSight Transect Video',
+      text: 'Dive transect recording from ReefSight.',
+    );
+  }
 }

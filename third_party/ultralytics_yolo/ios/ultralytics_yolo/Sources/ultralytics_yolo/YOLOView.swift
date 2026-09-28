@@ -455,6 +455,15 @@ public class YOLOView: UIView, VideoCaptureDelegate {
             }
           }
           self.videoCapture.previewLayer?.addSublayer(self.overlayLayer)
+          // `videoOrientation:` above (passed into `setUp`) was evaluated back when this method
+          // was first called, typically before this view was attached to a window -- so
+          // `currentVideoOrientation()` couldn't yet see the real (possibly landscape-locked)
+          // interface orientation and defaulted to `.portrait`. `setUp`'s permission-check +
+          // background-queue hop means this completion reliably runs after the view has landed
+          // in its window, so re-evaluating now catches the orientation `didMoveToWindow()`
+          // otherwise would have missed (it fires before setup completes, when the capture
+          // connection doesn't exist yet).
+          self.videoCapture.updateVideoOrientation(orientation: self.currentVideoOrientation())
           // Once everything is set up, we can start capturing live video.
           self.videoCapture.start()
         } else {
@@ -1012,7 +1021,25 @@ public class YOLOView: UIView, VideoCaptureDelegate {
     self.videoCapture.previewLayer?.frame = self.bounds
   }
 
+  // `init()` configures the capture session (and its initial `videoOrientation`, via
+  // `start(position:)` -> `currentVideoOrientation()`) before this view is attached to a
+  // window, so `window?.windowScene?.interfaceOrientation` is unavailable at that point and
+  // the orientation falls back to `.portrait` regardless of the app's actual (possibly
+  // landscape-locked) interface orientation. Re-syncing here, once `window` is non-nil and
+  // `interfaceOrientation` is actually knowable, corrects that initial guess without waiting
+  // on a physical device rotation.
+  public override func didMoveToWindow() {
+    super.didMoveToWindow()
+    guard window != nil else { return }
+    videoCapture.updateVideoOrientation(orientation: currentVideoOrientation())
+  }
+
   private func setUpOrientationChangeNotification() {
+    // `UIDevice.orientationDidChangeNotification` is only posted while something is generating
+    // device-orientation notifications -- keep it enabled for this view's lifetime so
+    // `orientationDidChange()` below actually fires on physical rotation. Paired with
+    // `endGeneratingDeviceOrientationNotifications()` in `deinit`.
+    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
     NotificationCenter.default.addObserver(
       self, selector: #selector(orientationDidChange),
       name: UIDevice.orientationDidChangeNotification, object: nil)
@@ -1563,6 +1590,10 @@ public class YOLOView: UIView, VideoCaptureDelegate {
 
     // Remove notification observers
     NotificationCenter.default.removeObserver(self)
+
+    // Pairs with `beginGeneratingDeviceOrientationNotifications()` in
+    // `setUpOrientationChangeNotification()`.
+    UIDevice.current.endGeneratingDeviceOrientationNotifications()
   }
 }
 

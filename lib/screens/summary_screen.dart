@@ -317,6 +317,27 @@ class _TechnicalTabState extends State<_TechnicalTab> {
   String? _exportError;
   String? _csvPath;
 
+  bool _isSharingVideo = false;
+  String? _videoShareError;
+
+  Future<void> _shareVideo(String videoPath) async {
+    setState(() {
+      _isSharingVideo = true;
+      _videoShareError = null;
+    });
+    try {
+      await ReportExporter.shareVideo(videoPath);
+      if (!mounted) return;
+      setState(() => _isSharingVideo = false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isSharingVideo = false;
+        _videoShareError = error.toString();
+      });
+    }
+  }
+
   Future<void> _exportAndShare() async {
     setState(() {
       _isExporting = true;
@@ -410,8 +431,44 @@ class _TechnicalTabState extends State<_TechnicalTab> {
               style: const TextStyle(color: AppColors.bleached, fontSize: 12),
             ),
           ),
+        if (_videoAvailable)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: SizedBox(
+              height: 52,
+              child: OutlinedButton.icon(
+                onPressed: _isSharingVideo ? null : () => _shareVideo(report.session.videoPath!),
+                icon: _isSharingVideo
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.videocam_outlined),
+                label: Text(_isSharingVideo ? 'Sharing...' : 'Share Transect Video'),
+              ),
+            ),
+          ),
+        if (_videoShareError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'Share failed: $_videoShareError',
+              style: const TextStyle(color: AppColors.bleached, fontSize: 12),
+            ),
+          ),
       ],
     );
+  }
+
+  /// The video path is only a stored string -- the file itself may be
+  /// missing (recording failed, or the OS reclaimed storage), so this
+  /// checks the disk directly rather than trusting a non-null
+  /// `videoPath` alone. Hides the button entirely rather than showing a
+  /// share action that would just fail.
+  bool get _videoAvailable {
+    final path = widget.report.session.videoPath;
+    return path != null && File(path).existsSync();
   }
 }
 

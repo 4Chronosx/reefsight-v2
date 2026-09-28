@@ -24,12 +24,13 @@ class TransectDatabase {
   static const _coloniesTable = 'tracked_colonies';
 
   /// Bumped from 1 -> 2 when `site_name`/`observer_name` were added to
-  /// `transect_sessions` (sub-plan 5, task 2) -- `onCreate` only runs for a
+  /// `transect_sessions` (sub-plan 5, task 2), and 2 -> 3 when `video_path`
+  /// was added (transect video export/share) -- `onCreate` only runs for a
   /// brand-new database file, so any device with an existing
-  /// `reefsight.db` from before that change needs `onUpgrade` to actually
+  /// `reefsight.db` from before either change needs `onUpgrade` to actually
   /// gain the new columns, or every subsequent `insertSession()` throws
-  /// `no such column: site_name`.
-  static const _schemaVersion = 2;
+  /// `no such column: ...`.
+  static const _schemaVersion = 3;
 
   static Future<TransectDatabase> open(String directory) async {
     final db = await openDatabase(
@@ -71,7 +72,8 @@ class TransectDatabase {
         tape_length_meters REAL NOT NULL,
         belt_width_meters REAL NOT NULL,
         site_name TEXT,
-        observer_name TEXT
+        observer_name TEXT,
+        video_path TEXT
       )
     ''');
     await db.execute('''
@@ -93,14 +95,17 @@ class TransectDatabase {
   }
 
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
-  /// order -- currently only 1 -> 2 exists, adding `site_name`/
-  /// `observer_name`. Nullable `ALTER TABLE ... ADD COLUMN` is safe on
+  /// order -- 1 -> 2 added `site_name`/`observer_name`, 2 -> 3 added
+  /// `video_path`. Nullable `ALTER TABLE ... ADD COLUMN` is safe on
   /// existing rows (they read back as `null`, matching
-  /// `TransectSession.fromMap`'s already-nullable handling of both).
+  /// `TransectSession.fromMap`'s already-nullable handling of all three).
   static Future<void> _upgradeSchema(Database db, int oldVersion) async {
     if (oldVersion < 2) {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN site_name TEXT');
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN observer_name TEXT');
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN video_path TEXT');
     }
   }
 
@@ -109,10 +114,15 @@ class TransectDatabase {
     return _db.insert(_sessionsTable, map);
   }
 
-  Future<void> closeSession(int sessionId, DateTime endedAt) async {
+  /// [videoPath] is optional -- omitted (or `null`) leaves the column
+  /// untouched rather than overwriting a previously-set path with `null`,
+  /// matching every existing caller/test that doesn't pass it.
+  Future<void> closeSession(int sessionId, DateTime endedAt, {String? videoPath}) async {
+    final values = {'ended_at': endedAt.toIso8601String()};
+    if (videoPath != null) values['video_path'] = videoPath;
     await _db.update(
       _sessionsTable,
-      {'ended_at': endedAt.toIso8601String()},
+      values,
       where: 'id = ?',
       whereArgs: [sessionId],
     );

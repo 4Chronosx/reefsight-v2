@@ -309,7 +309,11 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
           ),
         );
       }
-      await db.closeSession(sessionId, DateTime.now().toUtc());
+      await db.closeSession(
+        sessionId,
+        DateTime.now().toUtc(),
+        videoPath: _recorder.currentOutputPath,
+      );
     } finally {
       await db.close();
     }

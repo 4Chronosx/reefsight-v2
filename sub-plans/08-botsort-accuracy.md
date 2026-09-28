@@ -5,6 +5,13 @@ reference**: 4 synthetic parity fixtures in `test/tracking/fixtures/`, generated
 `tracking-validation/notebooks/generate_reference_fixtures.ipynb`. It never measured whether the
 tracker **tracks coral well**. This sub-plan is about that second question.
 
+**Prerequisites (added 2026-09-29, `sub-plans/model-accuracy-roadmap.md`):**
+- Sub-plan 09 must land first. Today the live loop drops frames while it classifies and skips
+  `update` on empty frames, so the "8 updates/second" assumed below doesn't hold. Use 09's *measured*
+  update rate for every seconds↔updates conversion here.
+- ML sub-plan 1 (Stage B v2) must land first too, because step 3's thresholds are chosen from the
+  detector's scores. ML sub-plan 1 produces that score histogram, so step 3 can reuse it.
+
 **Goal (decided 2026-09-28): tracking accuracy**, meaning fewer ID switches, fewer fragmented tracks,
 and above all fewer **double-counted colonies**. Unique track IDs are what the post-transect density
 and size-frequency metrics count (sub-plan 4), so a tracker error here is a survey-result error.

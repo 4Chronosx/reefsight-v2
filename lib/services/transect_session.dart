@@ -18,6 +18,7 @@ class TransectSession {
     this.beltWidthMeters = 1.0,
     this.siteName,
     this.observerName,
+    this.videoPath,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -38,6 +39,14 @@ class TransectSession {
   final String? siteName;
   final String? observerName;
 
+  /// Path to the continuous transect recording (`TransectRecorder`,
+  /// `mobile/third_party/ultralytics_yolo`'s recording patch -- see that
+  /// fork's `PATCH.md`), set once at session finalize
+  /// (`live_transect_screen.dart`'s `_finalizeSession`). `null` if
+  /// recording never started or the session never finalized (e.g. app
+  /// killed mid-dive).
+  final String? videoPath;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
@@ -46,6 +55,7 @@ class TransectSession {
     double? beltWidthMeters,
     String? siteName,
     String? observerName,
+    String? videoPath,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -55,6 +65,7 @@ class TransectSession {
       beltWidthMeters: beltWidthMeters ?? this.beltWidthMeters,
       siteName: siteName ?? this.siteName,
       observerName: observerName ?? this.observerName,
+      videoPath: videoPath ?? this.videoPath,
     );
   }
 
@@ -68,6 +79,7 @@ class TransectSession {
         'belt_width_meters': beltWidthMeters,
         'site_name': siteName,
         'observer_name': observerName,
+        'video_path': videoPath,
       };
 
   static TransectSession fromMap(Map<String, Object?> map) {
@@ -80,6 +92,7 @@ class TransectSession {
       beltWidthMeters: (map['belt_width_meters'] as num).toDouble(),
       siteName: map['site_name'] as String?,
       observerName: map['observer_name'] as String?,
+      videoPath: map['video_path'] as String?,
     );
   }
 }
