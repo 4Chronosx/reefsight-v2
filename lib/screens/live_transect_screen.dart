@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
-import '../constants/app_colors.dart';
+import '../services/app_settings.dart';
 import '../services/bleaching_classifier.dart';
 import '../services/colony_size.dart';
 import '../services/health_aggregator.dart';
@@ -17,6 +20,14 @@ import '../services/transect_session.dart';
 import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
 import '../tracking/tracker_detection.dart';
+import '../widgets/glove_button.dart';
+import '../widgets/live/diagnostics_overlay.dart';
+import '../widgets/live/end_transect_sheet.dart';
+import '../widgets/live/live_error_banner.dart';
+import '../widgets/live/recording_indicator.dart';
+import '../widgets/live/tally_hud.dart';
+import '../widgets/underwater_background.dart';
+import 'app_shell.dart';
 import 'summary_screen.dart';
 
 /// Live segmentation + crop-classify + tracking screen (sub-plan 3:
@@ -131,6 +142,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   String? _segmentationError;
   String? _recordingError;
 
+  // --- Sub-plan 6 (ui-ux-overhaul), step 6: presentation-only state. None
+  // of this feeds `_handleStreamingData`, `_startSession`, or
+  // `_finalizeSession` -- it only drives the HUD (decision 5).
+  bool _modelLoaded = false;
+  final _liveStartedAt = DateTime.now();
+  Timer? _tickTimer;
+
   @override
   void initState() {
     super.initState();
@@ -143,6 +161,24 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sessionStartFuture = _startSession();
+    });
+
+    // Decision 7: Live is locked to landscape; every other screen defaults
+    // to portrait (`main.dart`). Fire-and-forget -- a failure here shouldn't
+    // block the rest of `initState`, matching this file's existing
+    // `.catchError(...)`-and-log pattern for non-critical platform calls.
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]).catchError((Object error) {
+      debugPrint('ReefSight: failed to lock landscape orientation: $error');
+    });
+
+    // Drives the tally/recording HUD's elapsed-time display once a second.
+    // Pure UI refresh -- `_handleStreamingData` already triggers its own
+    // `setState` on every processed frame regardless of this timer.
+    _tickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -196,6 +232,18 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   @override
   void dispose() {
     _disposed = true;
+    _tickTimer?.cancel();
+
+    // Decision 7: restore the app-wide portrait default (`main.dart`) on
+    // leaving Live. Fire-and-forget, same reasoning as the lock in
+    // `initState` and as `_recorder.stop()` below -- this is UI-only and
+    // must not delay or interact with the session finalize chain underneath.
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]).catchError((Object error) {
+      debugPrint('ReefSight: failed to restore portrait orientation: $error');
+    });
 
     // Fire-and-forget: dispose() can't be async. Errors are logged, not
     // surfaced to UI that's about to be torn down anyway.
@@ -295,9 +343,24 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       await _finalizeSession();
 
       if (!mounted) return;
+
+      // Sub-plan 6 (ui-ux-overhaul) step 4: "Fix the back-stack after a
+      // survey... using `pushAndRemoveUntil` down to the shell route." The
+      // old `pushReplacement` left Setup directly underneath Summary, so
+      // pressing back from Summary landed on the setup form instead of
+      // Home. Restoring portrait here (in addition to `dispose()`'s own
+      // restore, harmless if it runs twice) avoids a landscape-then-portrait
+      // flash while the route transition to Summary is in flight.
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+      if (!mounted) return;
+
       if (sessionId != null) {
-        Navigator.of(context).pushReplacement(
+        Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => SummaryScreen(sessionId: sessionId)),
+          ModalRoute.withName(AppShell.routeName),
         );
       } else {
         Navigator.of(context).pop();
@@ -411,235 +474,218 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     }
   }
 
+  /// Opens the confirm sheet (sub-plan step 6 + decision: "Tapping it opens
+  /// a confirm sheet... Tapping twice by accident underwater must not end a
+  /// dive") and only proceeds to the real, guarded `_endTransect()` if the
+  /// diver confirms. Shared by the End Transect button and the `PopScope`
+  /// back/edge-swipe guard below -- neither path touches session state
+  /// directly, both funnel into the same `_endTransect()` (decision 5).
+  Future<void> _confirmEndTransect() async {
+    final confirmed = await showEndTransectSheet(
+      context,
+      colonyCount: _firstSeenAt.length,
+    );
+    if (!confirmed) return;
+    await _endTransect();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
-          YOLOView(
-            controller: _yoloController,
-            modelPath: ModelAssets.coralvosPrimarySegmentation,
-            task: YOLOTask.segment,
-            streamingConfig: const YOLOStreamingConfig.custom(
-              includeOriginalImage: true,
-              // Per-instance masks (mask-derived size, sub-plan 3 task 6)
-              // are opt-in -- without this, YOLOResult.mask stays null.
-              includeMasks: true,
-              // Caps both inference and how often a full camera frame is
-              // shipped over the platform channel -- Spec's "Target: 5-8
-              // fps" (ReefSight_Specification.md:88), not an arbitrary
-              // number.
-              inferenceFrequency: 8,
-            ),
-            onStreamingData: _handleStreamingData,
-            onModelError: (error, modelPath, task) {
-              debugPrint(
-                'ReefSight: segmentation model error for $modelPath ($task): $error',
-              );
-              if (mounted) setState(() => _segmentationError = error.toString());
-            },
-            onModelLoad: (modelPath, task) {
-              debugPrint('ReefSight: segmentation model loaded: $modelPath ($task)');
-              if (mounted) setState(() => _segmentationError = null);
-            },
-          ),
-          Positioned(
-            left: 12,
-            bottom: 12,
-            child: SafeArea(
-              child: _PerformanceAndTracksOverlay(
-                segProcessingMs: _segProcessingMs,
-                tracks: _latestTracks,
-                healthAggregator: _healthAggregator,
-                sizesPx: _latestSizePx,
-                segmentationError: _segmentationError,
-                recordingError: _recordingError,
-                persistError: _persistError,
+    final elapsed = DateTime.now().difference(_liveStartedAt);
+
+    return PopScope(
+      // Decision: "Back and edge-swipe guard: `PopScope(canPop: false)`
+      // routes to the same confirm sheet" -- a back swipe mid-dive no
+      // longer tears the screen down silently.
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        await _confirmEndTransect();
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
+            YOLOView(
+              controller: _yoloController,
+              modelPath: ModelAssets.coralvosPrimarySegmentation,
+              task: YOLOTask.segment,
+              streamingConfig: const YOLOStreamingConfig.custom(
+                includeOriginalImage: true,
+                // Per-instance masks (mask-derived size, sub-plan 3 task 6)
+                // are opt-in -- without this, YOLOResult.mask stays null.
+                includeMasks: true,
+                // Caps both inference and how often a full camera frame is
+                // shipped over the platform channel -- Spec's "Target: 5-8
+                // fps" (ReefSight_Specification.md:88), not an arbitrary
+                // number.
+                inferenceFrequency: 8,
               ),
+              onStreamingData: _handleStreamingData,
+              onModelError: (error, modelPath, task) {
+                debugPrint(
+                  'ReefSight: segmentation model error for $modelPath ($task): $error',
+                );
+                if (mounted) setState(() => _segmentationError = error.toString());
+              },
+              onModelLoad: (modelPath, task) {
+                debugPrint('ReefSight: segmentation model loaded: $modelPath ($task)');
+                if (mounted) {
+                  setState(() {
+                    _segmentationError = null;
+                    _modelLoaded = true;
+                  });
+                }
+              },
             ),
-          ),
-          // Running tally (Spec's "Live screen" line: "detection/
-          // segmentation overlay + a running tally (colonies seen,
-          // tentative healthy/bleached count)") -- distinct from the
-          // per-track debug overlay above.
-          Positioned(
-            top: 12,
-            right: 12,
-            child: SafeArea(
-              child: _TallyBadge(
-                seenCount: _firstSeenAt.length,
-                healthyCount: _firstSeenAt.keys
-                    .where((id) =>
-                        _healthAggregator.currentLabel(id) ==
-                        HealthAggregator.healthyLabel)
-                    .length,
-                bleachedCount: _firstSeenAt.keys
-                    .where((id) =>
-                        _healthAggregator.currentLabel(id) ==
-                        HealthAggregator.bleachedLabel)
-                    .length,
-              ),
-            ),
-          ),
-          // Large, glove-friendly tap target (DIVEVOLK SeaTouch housing,
-          // Spec's "Diver interaction" note) -- ends the transect and
-          // hands off to the report (SummaryScreen).
-          Positioned(
-            right: 12,
-            bottom: 12,
-            child: SafeArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (_endTransectError != null)
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      constraints: const BoxConstraints(maxWidth: 220),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        'Failed to end transect: $_endTransectError',
-                        style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-                      ),
-                    ),
-                  SizedBox(
-                    height: 56,
-                    child: ElevatedButton.icon(
-                      onPressed: _endingTransect ? null : _endTransect,
-                      icon: _endingTransect
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.stop_circle_outlined),
-                      label: Text(_endingTransect ? 'Ending...' : 'End Transect'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.bleached,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
+            // Loading state (sub-plan step 6): shown over `YOLOView`, which
+            // stays mounted underneath so `onModelLoad`/`onModelError` still
+            // fire -- this is an overlay, not a replacement widget.
+            if (!_modelLoaded)
+              const Positioned.fill(
+                child: UnderwaterBackground(
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(color: Colors.white),
+                        SizedBox(height: 16),
+                        Text(
+                          'Loading coral model…',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
-                ],
+                ),
+              ),
+            // Recording indicator, top-left -- decision 7's landscape HUD
+            // layout.
+            Positioned(
+              left: 12,
+              top: 12,
+              child: SafeArea(
+                child: RecordingIndicator(
+                  isRecording: _recorder.isRecording,
+                  elapsed: elapsed,
+                  errorMessage: _recordingError,
+                ),
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TallyBadge extends StatelessWidget {
-  const _TallyBadge({
-    required this.seenCount,
-    required this.healthyCount,
-    required this.bleachedCount,
-  });
-
-  final int seenCount;
-  final int healthyCount;
-  final int bleachedCount;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.black54,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.grid_view_rounded, color: Colors.white70, size: 14),
-          const SizedBox(width: 6),
-          Text(
-            '$seenCount seen   ✓$healthyCount   ✗$bleachedCount',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PerformanceAndTracksOverlay extends StatelessWidget {
-  const _PerformanceAndTracksOverlay({
-    required this.segProcessingMs,
-    required this.tracks,
-    required this.healthAggregator,
-    required this.sizesPx,
-    required this.segmentationError,
-    required this.recordingError,
-    required this.persistError,
-  });
-
-  final double? segProcessingMs;
-  final List<STrack> tracks;
-  final HealthAggregator healthAggregator;
-  final Map<int, double> sizesPx;
-  final String? segmentationError;
-  final String? recordingError;
-  final String? persistError;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black54,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'seg: ${segProcessingMs?.toStringAsFixed(1) ?? '--'}ms   '
-            'tracks: ${tracks.length}',
-            style: const TextStyle(color: Colors.white70, fontSize: 12),
-          ),
-          for (final track in tracks)
-            Text(
-              '#${track.trackId}: '
-              '${healthAggregator.currentLabel(track.trackId) ?? '--'} '
-              '(${sizesPx[track.trackId]?.toStringAsFixed(0) ?? '--'}px²)',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+            // Running tally, top edge -- Spec's "Live screen" line:
+            // "detection/segmentation overlay + a running tally (colonies
+            // seen, tentative healthy/bleached count)."
+            Positioned(
+              top: 12,
+              right: 12,
+              child: SafeArea(
+                child: TallyHud(
+                  seenCount: _firstSeenAt.length,
+                  healthyCount: _firstSeenAt.keys
+                      .where((id) =>
+                          _healthAggregator.currentLabel(id) ==
+                          HealthAggregator.healthyLabel)
+                      .length,
+                  bleachedCount: _firstSeenAt.keys
+                      .where((id) =>
+                          _healthAggregator.currentLabel(id) ==
+                          HealthAggregator.bleachedLabel)
+                      .length,
+                  elapsed: elapsed,
+                ),
               ),
             ),
-          if (segmentationError != null)
-            Text(
-              'Segmentation model error: $segmentationError',
-              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            // Error banners across the top -- never over the centre of the
+            // frame (decision 4).
+            if (_segmentationError != null || _persistError != null)
+              Positioned(
+                top: 64,
+                left: 12,
+                right: 12,
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      if (_segmentationError != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: LiveErrorBanner(
+                            message: 'Segmentation model error',
+                            detail: _segmentationError!,
+                          ),
+                        ),
+                      if (_persistError != null)
+                        LiveErrorBanner(
+                          message: 'Storage error',
+                          detail: _persistError!,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            // Debug overlay (per-track list + seg timing): hidden by
+            // default, toggled from Settings ("Show diagnostics"), docked
+            // to the left edge when shown (sub-plan step 6).
+            ValueListenableBuilder<bool>(
+              valueListenable: AppSettings.instance.showDiagnostics,
+              builder: (context, showDiagnostics, _) {
+                if (!showDiagnostics) return const SizedBox.shrink();
+                return Positioned(
+                  left: 12,
+                  bottom: 12,
+                  child: SafeArea(
+                    child: DiagnosticsOverlay(
+                      segProcessingMs: _segProcessingMs,
+                      tracks: _latestTracks,
+                      healthAggregator: _healthAggregator,
+                      sizesPx: _latestSizePx,
+                    ),
+                  ),
+                );
+              },
             ),
-          if (recordingError != null)
-            Text(
-              'Recording error: $recordingError',
-              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            // Large, glove-friendly End Transect control on the trailing
+            // (right) edge -- decision 7 (thumb rests on that side of the
+            // housing) and decision 4 (single destructive action, 64 dp).
+            Positioned(
+              right: 12,
+              bottom: 12,
+              child: SafeArea(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (_endTransectError != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        constraints: const BoxConstraints(maxWidth: 240),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Failed to end transect: $_endTransectError',
+                          style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                        ),
+                      ),
+                    GloveButton(
+                      label: _endingTransect ? 'Ending...' : 'End Transect',
+                      icon: Icons.stop_circle_outlined,
+                      destructive: true,
+                      inWater: true,
+                      busy: _endingTransect,
+                      onPressed: _confirmEndTransect,
+                    ),
+                  ],
+                ),
+              ),
             ),
-          if (persistError != null)
-            Text(
-              'Storage error: $persistError',
-              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }

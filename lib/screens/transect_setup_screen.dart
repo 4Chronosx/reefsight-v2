@@ -1,35 +1,84 @@
 import 'package:flutter/material.dart';
 
-import '../constants/app_colors.dart';
+import '../services/app_database.dart';
+import '../widgets/glove_button.dart';
+import '../widgets/section_card.dart';
 import 'live_transect_screen.dart';
 
-/// New for sub-plan 5 -- replaces `live_transect_screen.dart`'s old inline
-/// `AlertDialog` prompt for tape length with a proper screen, adapted from
-/// v1's `transect_setup_screen.dart` layout but collecting only what this
-/// project's data model actually uses: the physical tape length (density
-/// denominator, per `ReefSight_Specification.md`'s "Density, positioning,
-/// and sync" -- never GPS-derived) plus site/observer metadata for the
-/// report (sub-plan 5 task 2). v1's GPS start/end-point pickers are dropped
-/// -- this project has no per-quadrat GPS model to feed them (see
-/// `mobile/sub-plans/05-ui-and-reporting.md` plan's scoping note).
+/// The field team's tapes are 50-100 m (2026-09-28); kept as one `const`
+/// list per the sub-plan so the presets are trivial to change.
+const kTapeLengthPresetsMeters = [50, 75, 100];
+
+/// Sub-plan 6 (ui-ux-overhaul), step 5: restyle of sub-plan 5's
+/// `TransectSetupScreen` -- grouped `SectionCard`s, tape-length quick-pick
+/// chips, a non-blocking out-of-range hint, and site/observer prefilled from
+/// the most recent session. Still collects only what this project's data
+/// model uses: the physical tape length (density denominator, per
+/// `ReefSight_Specification.md`'s "Density, positioning, and sync") plus
+/// site/observer metadata -- v1's GPS start/end-point pickers stay dropped.
 class TransectSetupScreen extends StatefulWidget {
-  const TransectSetupScreen({super.key});
+  const TransectSetupScreen({super.key, this.openDatabase = openAppDatabase});
+
+  /// Injectable so widget tests can substitute an in-memory DB instead of
+  /// `path_provider` (no platform channel under `flutter test`).
+  final DatabaseOpener openDatabase;
 
   @override
   State<TransectSetupScreen> createState() => _TransectSetupScreenState();
 }
 
 class _TransectSetupScreenState extends State<TransectSetupScreen> {
-  final _tapeLengthController = TextEditingController(text: '10');
+  final _tapeLengthController = TextEditingController(text: '50');
   final _siteController = TextEditingController();
   final _observerController = TextEditingController();
 
-  double? get _parsedTapeLength =>
-      double.tryParse(_tapeLengthController.text);
+  @override
+  void initState() {
+    super.initState();
+    _prefillFromLastSession();
+  }
+
+  /// Prefill is a convenience, not a requirement (sub-plan step 5: "avoids
+  /// adding a preferences dependency") -- a DB read failure here shouldn't
+  /// block filling the form manually, so it's caught and dropped rather than
+  /// surfaced as an error.
+  Future<void> _prefillFromLastSession() async {
+    try {
+      final db = await widget.openDatabase();
+      try {
+        final sessions = await db.listSessions();
+        if (sessions.isEmpty || !mounted) return;
+        final last = sessions.first.session;
+        setState(() {
+          _siteController.text = last.siteName ?? '';
+          _observerController.text = last.observerName ?? '';
+        });
+      } finally {
+        await db.close();
+      }
+    } catch (_) {
+      // Ignored -- see doc comment above.
+    }
+  }
+
+  double? get _parsedTapeLength => double.tryParse(_tapeLengthController.text);
 
   bool get _isValid {
     final parsed = _parsedTapeLength;
     return parsed != null && parsed > 0;
+  }
+
+  /// Non-blocking (sub-plan step 5): a length outside the field team's usual
+  /// 50-100 m tapes gets a hint, never a disabled Start button. Requires
+  /// `parsed > 0` (not just `_isValid`'s exact check, spelled out again here
+  /// to keep this getter self-contained) so this can never be true at the
+  /// same time as `_isValid` is false -- `InputDecoration.errorText` and
+  /// `helperText` both non-null at once is a real (not just cosmetic) bug:
+  /// a blank/zero/negative entry must show the "enter a positive number"
+  /// error, not layer an "outside 50-100 m" hint on top of it.
+  bool get _outsideUsualRange {
+    final parsed = _parsedTapeLength;
+    return parsed != null && parsed > 0 && (parsed < 50 || parsed > 100);
   }
 
   @override
@@ -46,9 +95,8 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
       MaterialPageRoute(
         builder: (_) => LiveTransectScreen(
           tapeLengthMeters: _parsedTapeLength!,
-          siteName: _siteController.text.trim().isEmpty
-              ? null
-              : _siteController.text.trim(),
+          siteName:
+              _siteController.text.trim().isEmpty ? null : _siteController.text.trim(),
           observerName: _observerController.text.trim().isEmpty
               ? null
               : _observerController.text.trim(),
@@ -60,77 +108,89 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        title: const Text('Transect setup'),
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-      ),
+      appBar: AppBar(title: const Text('Transect setup')),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(16),
           children: [
-            const Text(
-              'Enter the physical marked transect tape length -- this is '
-              'the density denominator, not a GPS-derived distance.',
-              style: TextStyle(color: AppColors.onSurface, fontSize: 13),
+            SectionCard(
+              icon: Icons.straighten_rounded,
+              title: 'Transect',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Enter the physical marked transect tape length -- this '
+                    'is the density denominator, not a GPS-derived distance.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final preset in kTapeLengthPresetsMeters)
+                        ChoiceChip(
+                          label: Text('$preset m'),
+                          selected: _tapeLengthController.text == preset.toString(),
+                          onSelected: (_) => setState(
+                            () => _tapeLengthController.text = preset.toString(),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _tapeLengthController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    style: const TextStyle(fontSize: 20),
+                    decoration: InputDecoration(
+                      labelText: 'Tape length (meters)',
+                      errorText: _isValid ? null : 'Enter a positive number',
+                      helperText: _outsideUsualRange
+                          ? 'Outside the usual 50-100 m range. Double-check the tape length.'
+                          : null,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 16),
-            TextField(
-              controller: _tapeLengthController,
-              autofocus: true,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              style: const TextStyle(fontSize: 20),
-              decoration: InputDecoration(
-                labelText: 'Tape length (meters)',
-                filled: true,
-                fillColor: AppColors.surface,
-                border: const OutlineInputBorder(),
-                errorText: _isValid ? null : 'Enter a positive number',
+            SectionCard(
+              icon: Icons.badge_outlined,
+              title: 'Survey details',
+              child: Column(
+                children: [
+                  TextField(
+                    controller: _siteController,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(labelText: 'Site name (optional)'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _observerController,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(labelText: 'Observer name (optional)'),
+                  ),
+                ],
               ),
-              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 16),
+            const SectionCard(
+              icon: Icons.checklist_rounded,
+              title: 'Before you dive',
+              child: Text(
+                '• Camera housing sealed\n'
+                '• Transect tape laid out\n'
+                '• Lighting checked\n'
+                '• Phone held in landscape orientation',
+                style: TextStyle(fontSize: 13, height: 1.6),
+              ),
             ),
             const SizedBox(height: 24),
-            TextField(
-              controller: _siteController,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
-                labelText: 'Site name (optional)',
-                filled: true,
-                fillColor: AppColors.surface,
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _observerController,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
-                labelText: 'Observer name (optional)',
-                filled: true,
-                fillColor: AppColors.surface,
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 32),
-            // Large, glove-friendly tap target (DIVEVOLK SeaTouch housing,
-            // Spec's "Diver interaction" note).
-            SizedBox(
-              height: 56,
-              child: ElevatedButton(
-                onPressed: _isValid ? _startTransect : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                child: const Text(
-                  'Start transect',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-              ),
+            GloveButton(
+              label: 'Start Transect',
+              onPressed: _isValid ? _startTransect : null,
             ),
           ],
         ),

@@ -178,4 +178,93 @@ void main() {
       expect(rowsA.single.trackId, 1);
     });
   });
+
+  // Sub-plan 6 (ui-ux-overhaul), step 2: the only data-layer addition --
+  // read-only, no schema change. Backs the Surveys (history) tab, which
+  // otherwise has no way to list what's already in SQLite.
+  group('TransectDatabase.listSessions', () {
+    late TransectDatabase db;
+
+    setUp(() async {
+      db = await TransectDatabase.openInMemoryForTest();
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    Future<int> insertSession(DateTime startedAt, {DateTime? endedAt}) async {
+      final id = await db.insertSession(
+        TransectSession(startedAt: startedAt, tapeLengthMeters: 50),
+      );
+      if (endedAt != null) {
+        await db.closeSession(id, endedAt);
+      }
+      return id;
+    }
+
+    Future<void> insertColony(
+      int sessionId,
+      int trackId, {
+      String? healthLabel,
+    }) =>
+        db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: trackId,
+            healthLabel: healthLabel,
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+          ),
+        );
+
+    test('returns sessions newest-started first', () async {
+      final older = await insertSession(DateTime.utc(2026, 1, 1));
+      final newer = await insertSession(DateTime.utc(2026, 1, 3));
+      final middle = await insertSession(DateTime.utc(2026, 1, 2));
+
+      final summaries = await db.listSessions();
+
+      expect(
+        summaries.map((s) => s.session.id).toList(),
+        [newer, middle, older],
+      );
+    });
+
+    test('counts colonies and bleached colonies per session, not N+1', () async {
+      final sessionId = await insertSession(DateTime.utc(2026, 1, 1));
+      await insertColony(sessionId, 1, healthLabel: 'CORAL');
+      await insertColony(sessionId, 2, healthLabel: 'CORAL_BL');
+      await insertColony(sessionId, 3, healthLabel: 'CORAL_BL');
+      await insertColony(sessionId, 4); // unclassified
+
+      final summaries = await db.listSessions();
+
+      expect(summaries, hasLength(1));
+      expect(summaries.single.colonyCount, 4);
+      expect(summaries.single.bleachedCount, 2);
+    });
+
+    test('a session with zero colonies reports zero counts, not null', () async {
+      await insertSession(DateTime.utc(2026, 1, 1));
+
+      final summaries = await db.listSessions();
+
+      expect(summaries, hasLength(1));
+      expect(summaries.single.colonyCount, 0);
+      expect(summaries.single.bleachedCount, 0);
+    });
+
+    test('a session with ended_at IS NULL is listed as incomplete', () async {
+      final inProgressId = await insertSession(DateTime.utc(2026, 1, 1));
+      await insertSession(DateTime.utc(2026, 1, 2), endedAt: DateTime.utc(2026, 1, 2, 1));
+
+      final summaries = await db.listSessions();
+      final inProgress =
+          summaries.firstWhere((s) => s.session.id == inProgressId);
+
+      expect(inProgress.session.endedAt, isNull);
+    });
+  });
 }

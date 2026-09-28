@@ -43,6 +43,19 @@ any non-trivial architecture decision.
    v1's screens/widgets/geofencing/export get adapted in. Deliberately last: UI can be built against
    the real data models from step 4 instead of guessing at their shape, and this is where most of v1's
    genuinely reusable work actually plugs in.
+6. **UI/UX overhaul** (`sub-plans/06-ui-ux-overhaul.md`): the visual and navigation half of step 5's v1
+   salvage, which never shipped. It adds an app shell with bottom navigation, a survey history screen,
+   the v1 splash/home design and assets, and a glove-readable Live HUD locked to landscape. Presentation
+   only, with no pipeline changes.
+7. **Cloud sync** (`sub-plans/07-cloud-sync.md`): offline-first, manual after-dive sync of records,
+   masks, and video to Cloudflare (Worker + D1 + R2), one account per diver for now, Google/Apple sign-in,
+   video capped to the R2 free tier. SQLite stays
+   the on-device system of record. Comes after step 6. Video upload is the last and lowest-priority piece.
+8. **BoT-SORT tracking accuracy** (`sub-plans/08-botsort-accuracy.md`): measure the ported tracker on
+   real coral video (pseudo ground truth derived from CoralVOS's 13 reserved videos, split into tuning
+   and held-out sets). Then turn on camera motion compensation (ported but not wired into the live app),
+   re-tune the pedestrian-default thresholds for coral at 8 Hz, and add a minimum-track-length filter
+   before counting. It produces the MOTA/MOTP/IDF1 numbers the Specification's Phase E requires.
 
 ## Explicitly out of scope for now
 

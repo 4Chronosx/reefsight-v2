@@ -1,6 +1,8 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import 'health_aggregator.dart';
+import 'session_summary.dart';
 import 'tracked_colony_record.dart';
 import 'transect_session.dart';
 
@@ -149,6 +151,37 @@ class TransectDatabase {
       whereArgs: [sessionId],
     );
     return rows.map(TrackedColonyRecord.fromMap).toList(growable: false);
+  }
+
+  /// Every session, newest-started first, each paired with its colony count
+  /// and bleached-colony count -- backs the Surveys (history) tab (sub-plan
+  /// 6 step 2). One `LEFT JOIN ... GROUP BY` query rather than N+1: a
+  /// session with zero colonies still gets one row out of the join (with
+  /// `c.id` null), so `COUNT(c.id)` correctly reads 0 rather than being
+  /// skipped. Rows with `ended_at IS NULL` (app killed mid-dive) are
+  /// included -- Surveys must list and flag them as incomplete, not hide
+  /// them (decision 8 in the sub-plan: no delete/clear action exists, so an
+  /// incomplete session is the only way that data is ever seen again).
+  Future<List<SessionSummary>> listSessions() async {
+    final rows = await _db.rawQuery('''
+      SELECT s.*,
+             COUNT(c.id) AS colony_count,
+             SUM(CASE WHEN c.health_label = ? THEN 1 ELSE 0 END) AS bleached_count
+      FROM $_sessionsTable s
+      LEFT JOIN $_coloniesTable c ON c.session_id = s.id
+      GROUP BY s.id
+      ORDER BY s.started_at DESC, s.id DESC
+    ''', [HealthAggregator.bleachedLabel]);
+
+    return rows
+        .map(
+          (row) => SessionSummary(
+            session: TransectSession.fromMap(row),
+            colonyCount: (row['colony_count'] as num?)?.toInt() ?? 0,
+            bleachedCount: (row['bleached_count'] as num?)?.toInt() ?? 0,
+          ),
+        )
+        .toList(growable: false);
   }
 
   Future<void> close() => _db.close();

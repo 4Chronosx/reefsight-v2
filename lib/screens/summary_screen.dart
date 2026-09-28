@@ -5,24 +5,33 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
-import '../services/health_aggregator.dart';
+import '../services/app_database.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/tracked_colony_record.dart';
-import '../services/transect_database.dart';
+import '../widgets/health_chip.dart';
+import 'app_shell.dart';
 
-/// Sub-plan 5 (ui-and-reporting) tasks 4-5: the post-dive report, two tabs
-/// on one dataset per `ReefSight_Specification.md`'s "Post-dive report"
-/// line -- Executive (LGU/decision-maker audience) and Technical
-/// (academic panel). Adapted from v1's `summary_screen.dart` (donut chart,
-/// health bars) but built on sub-plan 4's real schema, not v1's GPS-quadrat
-/// model -- no map tab, no quadrat chart, since this project has no
-/// per-quadrat GPS data to back them (see `mobile/sub-plans/
-/// 05-ui-and-reporting.md` plan's scoping note).
+/// Sub-plan 5 (ui-and-reporting) tasks 4-5, restyled by sub-plan 6
+/// (ui-ux-overhaul) step 4: the post-dive report, two tabs on one dataset
+/// per `ReefSight_Specification.md`'s "Post-dive report" line -- Executive
+/// (LGU/decision-maker audience) and Technical (academic panel). The
+/// Executive tab's content is unchanged by sub-plan 6 (Spec line 125 marks
+/// it `[OPEN]`); this pass only applies the shared theme, adds a header, and
+/// fixes the back-stack so Summary always returns to [AppShell], never to
+/// Transect Setup (sub-plan 6 step 4).
 class SummaryScreen extends StatefulWidget {
-  const SummaryScreen({super.key, required this.sessionId});
+  const SummaryScreen({
+    super.key,
+    required this.sessionId,
+    this.openDatabase = openAppDatabase,
+  });
 
   final int sessionId;
+
+  /// Injectable so widget tests can substitute an in-memory DB instead of
+  /// `path_provider` (no platform channel under `flutter test`).
+  final DatabaseOpener openDatabase;
 
   @override
   State<SummaryScreen> createState() => _SummaryScreenState();
@@ -32,8 +41,7 @@ class _SummaryScreenState extends State<SummaryScreen> {
   late final Future<TransectReport> _reportFuture = _loadReport();
 
   Future<TransectReport> _loadReport() async {
-    final documentsDir = await getApplicationDocumentsDirectory();
-    final db = await TransectDatabase.open(documentsDir.path);
+    final db = await widget.openDatabase();
     try {
       final session = await db.sessionById(widget.sessionId);
       if (session == null) {
@@ -46,10 +54,30 @@ class _SummaryScreenState extends State<SummaryScreen> {
     }
   }
 
+  /// Sub-plan 6 step 4: "Back from Summary must never land on Transect
+  /// Setup." Pops every route above the shell in one call, regardless of how
+  /// the diver got here -- the End Transect handoff
+  /// (`live_transect_screen.dart`'s `_endTransect`) or opening a past survey
+  /// from Home/Surveys. A plain `pop()` would only remove this one route and
+  /// land on whatever pushed it (Setup, in the End Transect case), which is
+  /// exactly the bug this fixes.
+  void _done() =>
+      Navigator.of(context).popUntil(ModalRoute.withName(AppShell.routeName));
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
+      appBar: AppBar(
+        title: const Text('Transect report'),
+        actions: [
+          TextButton(
+            onPressed: _done,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: FutureBuilder<TransectReport>(
           future: _reportFuture,
@@ -62,10 +90,57 @@ class _SummaryScreenState extends State<SummaryScreen> {
                 child: Text('Failed to load report: ${snapshot.error}'),
               );
             }
-            return _ReportTabs(report: snapshot.data!);
+            return _ReportBody(report: snapshot.data!);
           },
         ),
       ),
+    );
+  }
+}
+
+/// New in sub-plan 6 step 4: "add a header showing site, date, and tape
+/// length" -- shared across both tabs, so it replaces the identity block the
+/// old Executive tab used to render at the top of its own `ListView`.
+class _ReportBody extends StatelessWidget {
+  const _ReportBody({required this.report});
+
+  final TransectReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final session = report.session;
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+          color: AppColors.surface,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                session.siteName ?? 'Unnamed site',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.onSurface,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '${session.startedAt.toLocal().toString().substring(0, 16)}'
+                ' · ${session.tapeLengthMeters.toStringAsFixed(0)}m transect'
+                '${session.observerName == null ? '' : ' · ${session.observerName}'}',
+                style: TextStyle(
+                  color: AppColors.onSurface.withValues(alpha: 0.6),
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(child: _ReportTabs(report: report)),
+      ],
     );
   }
 }
@@ -104,10 +179,11 @@ class _ReportTabs extends StatelessWidget {
   }
 }
 
-/// LGU/decision-maker audience: session identity, total colonies, a
-/// healthy/bleached donut, and bleaching prevalence framed in plain
-/// language -- no track IDs, confidence numbers, or size-frequency detail
-/// (that's the Technical tab).
+/// LGU/decision-maker audience: a healthy/bleached donut and bleaching
+/// prevalence framed in plain language -- no track IDs, confidence numbers,
+/// or size-frequency detail (that's the Technical tab). Content is
+/// unchanged from sub-plan 5 -- Spec line 125 marks this tab `[OPEN]`, and
+/// this sub-plan restyles what exists rather than inventing new content.
 class _ExecutiveTab extends StatelessWidget {
   const _ExecutiveTab({required this.report});
 
@@ -115,31 +191,11 @@ class _ExecutiveTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final session = report.session;
     final prevalence = report.bleachingPrevalenceFraction;
 
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        Text(
-          session.siteName ?? 'Unknown Site',
-          style: const TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-            color: AppColors.onSurface,
-          ),
-        ),
-        if (session.observerName != null)
-          Text(
-            'Observed by ${session.observerName}',
-            style: TextStyle(color: AppColors.onSurface.withValues(alpha: 0.6)),
-          ),
-        Text(
-          '${session.startedAt.toLocal().toString().substring(0, 16)} '
-          '· ${session.tapeLengthMeters.toStringAsFixed(0)}m transect',
-          style: TextStyle(color: AppColors.onSurface.withValues(alpha: 0.6)),
-        ),
-        const SizedBox(height: 24),
         SizedBox(
           height: 190,
           child: Stack(
@@ -177,33 +233,30 @@ class _ExecutiveTab extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 24),
-        _HealthBar(
+        HealthBar(
           label: 'Healthy',
           count: report.healthyCount,
           total: report.totalColonies,
           color: AppColors.healthy,
         ),
         const SizedBox(height: 8),
-        _HealthBar(
+        HealthBar(
           label: 'Bleached',
           count: report.bleachedCount,
           total: report.totalColonies,
           color: AppColors.bleached,
         ),
         const SizedBox(height: 24),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.grey.shade200),
-          ),
-          child: Text(
-            prevalence == null
-                ? 'No colonies were successfully classified this session.'
-                : '${(prevalence * 100).toStringAsFixed(0)}% of surveyed '
-                    'colonies showed signs of bleaching.',
-            style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              prevalence == null
+                  ? 'No colonies were successfully classified this session.'
+                  : '${(prevalence * 100).toStringAsFixed(0)}% of surveyed '
+                      'colonies showed signs of bleaching.',
+              style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -339,11 +392,6 @@ class _TechnicalTabState extends State<_TechnicalTab> {
                   )
                 : const Icon(Icons.share),
             label: Text(_isExporting ? 'Exporting...' : 'Export & Share CSV'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
           ),
         ),
         if (_csvPath != null)
@@ -487,14 +535,8 @@ class _ColonyDetailRow extends StatelessWidget {
                   'Track #${colony.trackId}',
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                 ),
-                Text(
-                  colony.healthLabel == null
-                      ? 'Unclassified'
-                      : colony.healthLabel == HealthAggregator.bleachedLabel
-                          ? 'Bleached'
-                          : 'Healthy',
-                  style: TextStyle(color: color, fontSize: 12),
-                ),
+                const SizedBox(height: 2),
+                HealthChip(healthLabel: colony.healthLabel),
               ],
             ),
           ),
@@ -504,49 +546,6 @@ class _ColonyDetailRow extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _HealthBar extends StatelessWidget {
-  const _HealthBar({
-    required this.label,
-    required this.count,
-    required this.total,
-    required this.color,
-  });
-
-  final String label;
-  final int count;
-  final int total;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = total > 0 ? count / total : 0.0;
-    return Row(
-      children: [
-        SizedBox(width: 72, child: Text(label, style: const TextStyle(fontSize: 13))),
-        Expanded(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: pct,
-              backgroundColor: color.withValues(alpha: 0.15),
-              valueColor: AlwaysStoppedAnimation<Color>(color),
-              minHeight: 10,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 64,
-          child: Text(
-            '$count (${(pct * 100).toStringAsFixed(0)}%)',
-            style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold),
-          ),
-        ),
-      ],
     );
   }
 }

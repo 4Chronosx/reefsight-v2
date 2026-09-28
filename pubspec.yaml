@@ -106,6 +106,14 @@ flutter:
   assets:
     - assets/models/coralvos_primary.mlpackage.zip
     - assets/models/nmfs_osi_bleaching.mlpackage.zip
+    # Sub-plan 6 (ui-ux-overhaul), step 1: branding/reference imagery
+    # ported from ../reefsight (v1) as-is -- see that sub-plan's decision 9
+    # (photo provenance deferred).
+    - assets/images/full_logo.png
+    - assets/images/deep-sea.jpg
+    - assets/images/healthy_coral.png
+    - assets/images/bleached_coral.png
+    - assets/icon/app_icon.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
