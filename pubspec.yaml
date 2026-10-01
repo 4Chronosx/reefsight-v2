@@ -67,6 +67,11 @@ dependencies:
   google_fonts: ^6.2.1
   video_player: ^2.11.1
 
+  # Sub-plan 11 (live session safety): keeps the screen from auto-locking
+  # during Live. Already resolved in pubspec.lock as a transitive
+  # dependency at this version -- promoted, not newly added.
+  wakelock_plus: ^1.5.2
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an

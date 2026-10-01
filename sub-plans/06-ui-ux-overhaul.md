@@ -71,6 +71,10 @@ Concrete gaps:
    sub-plan 5 and in `transect_setup_screen.dart`'s doc comment. Environmental data arrives through
    Hobologger ingestion (sub-plan 5 step 2), not diver-typed fields. Don't port v1's quadrat transition
    overlay.
+   **Correction (2026-10-01):** "already scoped out in sub-plan 5" was wrong for GPS. Sub-plan 05 said
+   to port v1's geospatial layer, and the Spec requires a surface GPS fix at dive **entry and exit**. The
+   live map, geofence and quadrat UI stay dropped. The two fixes are restored by
+   `12-entry-exit-gps.md`.
 4. **Glove-first sizing.** Every in-water control is at least 64 dp tall. Topside controls are at least
    56 dp, which is the existing convention in this codebase. Don't put two destructive or primary actions
    next to each other on the Live screen. Minimum body text on Live is 16 sp, with high contrast against

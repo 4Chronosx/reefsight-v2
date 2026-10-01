@@ -15,6 +15,8 @@ import '../services/live_frame_processor.dart';
 import '../services/live_loop_metrics.dart';
 import '../services/mask_storage.dart';
 import '../services/model_assets.dart';
+import '../services/screen_awake.dart';
+import '../services/session_checkpointer.dart';
 import '../services/tracked_colony_record.dart';
 import '../services/transect_database.dart';
 import '../services/transect_recorder.dart';
@@ -56,6 +58,7 @@ class LiveTransectScreen extends StatefulWidget {
     required this.tapeLengthMeters,
     this.siteName,
     this.observerName,
+    this.screenAwake = const WakelockScreenAwake(),
   });
 
   /// Physical marked transect tape length, collected up front by
@@ -67,13 +70,18 @@ class LiveTransectScreen extends StatefulWidget {
   final String? siteName;
   final String? observerName;
 
+  /// Keeps the screen from auto-locking for exactly this Live session
+  /// (sub-plan 11 step 1). Injectable for tests.
+  final ScreenAwake screenAwake;
+
   @override
   State<LiveTransectScreen> createState() => _LiveTransectScreenState();
 }
 
 /// One frame's mask + health for a single detection, carried opaquely
 /// through the tracker via [TrackerDetection.payload] / [STrack.payload].
-class _LiveTransectScreenState extends State<LiveTransectScreen> {
+class _LiveTransectScreenState extends State<LiveTransectScreen>
+    with WidgetsBindingObserver {
   final _classifier = BleachingClassifier(
     modelAssetPath: ModelAssets.nmfsOsiBleachingClassifier,
   );
@@ -95,6 +103,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   final Map<int, DateTime> _lastSeenAt = {};
   final Map<int, List<List<double>>> _latestMasks = {};
   String? _persistError;
+
+  // Sub-plan 11 (live session safety). The checkpointer is created once
+  // `_startSession` has a DB and session id, and from then on every colony
+  // write -- periodic checkpoints and the final one in `_finalizeSession` --
+  // goes through its single queue.
+  late final ScreenAwakeLease _screenAwake;
+  SessionCheckpointer? _checkpointer;
 
   // `_startSession()` runs fire-and-forget from a post-frame callback, and
   // can still be mid-flight (awaiting the dialog, the DB open, or the
@@ -146,6 +161,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   @override
   void initState() {
     super.initState();
+    // Sub-plan 11: no auto-lock mid-transect, and a checkpoint the moment
+    // the app leaves the foreground (`didChangeAppLifecycleState`).
+    _screenAwake = ScreenAwakeLease(widget.screenAwake)..acquire();
+    WidgetsBinding.instance.addObserver(this);
     _recorder = TransectRecorder(
       startRecording: _yoloController.startRecording,
       stopRecording: _yoloController.stopRecording,
@@ -213,6 +232,19 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       );
       _db = db;
       _sessionId = sessionId;
+      _checkpointer = SessionCheckpointer(
+        db: db,
+        sessionId: sessionId,
+        snapshot: () => [
+          for (final trackId in _firstSeenAt.keys) _colonyRecord(sessionId, trackId),
+        ],
+        onFailure: (_) {
+          if (mounted) setState(() {});
+        },
+      );
+      // Not started if dispose() already ran: its finalize is waiting on
+      // this future and will close the checkpointer itself.
+      if (!_disposed) _checkpointer!.start();
     } catch (error) {
       await db?.close();
       debugPrint('ReefSight: failed to start transect session: $error');
@@ -237,6 +269,8 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   void dispose() {
     _disposed = true;
     _tickTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _screenAwake.release();
 
     // Decision 7: restore the app-wide portrait default (`main.dart`) on
     // leaving Live. Fire-and-forget, same reasoning as the lock in
@@ -285,10 +319,42 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   /// as a finalized [TrackedColonyRecord], then closes the session and the
   /// DB handle. A no-op if [_startSession] never got as far as opening a DB
   /// (e.g. the diver never entered a tape length).
+  ///
+  /// Sub-plan 11: runs through [SessionCheckpointer.finalize], which stops
+  /// further checkpoints and waits out an in-flight one first, so the two
+  /// never write -- or close the DB -- under each other.
   Future<void> _finalizeSession() async {
     if (_finalized) return;
     _finalized = true;
 
+    final checkpointer = _checkpointer;
+    if (checkpointer == null) {
+      await _frameProcessor.close();
+      return;
+    }
+    await checkpointer.finalize(_writeFinalColonies);
+  }
+
+  /// One track's current record from the in-memory maps. Shared by the
+  /// periodic checkpoint (no mask) and finalize (with the saved mask).
+  TrackedColonyRecord _colonyRecord(
+    int sessionId,
+    int trackId, {
+    String? maskPath,
+  }) {
+    return TrackedColonyRecord(
+      sessionId: sessionId,
+      trackId: trackId,
+      healthLabel: _healthAggregator.currentLabel(trackId),
+      healthHistory: _healthHistoryRecorder.samplesFor(trackId),
+      sizePx: _latestSizePx[trackId],
+      firstSeenAt: _firstSeenAt[trackId]!,
+      lastSeenAt: _lastSeenAt[trackId]!,
+      maskPath: maskPath,
+    );
+  }
+
+  Future<void> _writeFinalColonies() async {
     // Freeze the live loop first, so no new track ids, masks or sizes land
     // while the loop below awaits mask writes and upserts. Idempotent with
     // dispose()'s own close().
@@ -300,10 +366,11 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
 
     try {
       final documentsDir = await getApplicationDocumentsDirectory();
+      final records = <TrackedColonyRecord>[];
       // A snapshot: streaming events keep arriving while this loop awaits
-      // mask writes and DB upserts, and a new track id landing in
-      // `_firstSeenAt` mid-iteration would throw a concurrent-modification
-      // error and abort the finalize.
+      // mask writes, and a new track id landing in `_firstSeenAt`
+      // mid-iteration would throw a concurrent-modification error and abort
+      // the finalize.
       for (final trackId in _firstSeenAt.keys.toList()) {
         final mask = _latestMasks[trackId];
         final maskPath = mask == null
@@ -314,20 +381,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
                 trackId: trackId,
                 mask: mask,
               );
-
-        await db.upsertColony(
-          TrackedColonyRecord(
-            sessionId: sessionId,
-            trackId: trackId,
-            healthLabel: _healthAggregator.currentLabel(trackId),
-            healthHistory: _healthHistoryRecorder.samplesFor(trackId),
-            sizePx: _latestSizePx[trackId],
-            firstSeenAt: _firstSeenAt[trackId]!,
-            lastSeenAt: _lastSeenAt[trackId]!,
-            maskPath: maskPath,
-          ),
-        );
+        records.add(_colonyRecord(sessionId, trackId, maskPath: maskPath));
       }
+      await db.upsertColonies(records);
       await db.closeSession(
         sessionId,
         DateTime.now().toUtc(),
@@ -364,6 +420,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       final sessionId = _sessionId;
       await _recorder.stop();
       await _finalizeSession();
+      // The transect is over; Summary may auto-lock normally. Not released
+      // on failure -- the diver is still on this screen and may retry.
+      _screenAwake.release();
 
       if (!mounted) return;
 
@@ -396,6 +455,18 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
           _endTransectError = error.toString();
         });
       }
+    }
+  }
+
+  /// Sub-plan 11 step 3: leaving the foreground (call, notification
+  /// centre, app switch) checkpoints immediately and is recorded on the
+  /// session. On return, the wakelock is reasserted in case the OS dropped
+  /// it while backgrounded.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _checkpointer?.handleLifecycle(state);
+    if (state == AppLifecycleState.resumed && !_finalized && !_disposed) {
+      _screenAwake.acquire();
     }
   }
 
@@ -683,6 +754,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
                       tracks: _latestTracks,
                       healthAggregator: _healthAggregator,
                       sizesPx: _latestSizePx,
+                      checkpointFailures: _checkpointer?.failureCount ?? 0,
                     ),
                   ),
                 );

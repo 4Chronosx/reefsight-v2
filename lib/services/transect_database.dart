@@ -29,8 +29,9 @@ class TransectDatabase {
   /// brand-new database file, so any device with an existing
   /// `reefsight.db` from before either change needs `onUpgrade` to actually
   /// gain the new columns, or every subsequent `insertSession()` throws
-  /// `no such column: ...`.
-  static const _schemaVersion = 3;
+  /// `no such column: ...`. 3 -> 4 added the checkpoint/interruption
+  /// columns (sub-plan 11: live session safety).
+  static const _schemaVersion = 4;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -82,7 +83,11 @@ class TransectDatabase {
         belt_width_meters REAL NOT NULL,
         site_name TEXT,
         observer_name TEXT,
-        video_path TEXT
+        video_path TEXT,
+        last_checkpoint_at TEXT,
+        interruption_count INTEGER,
+        first_interrupted_at TEXT,
+        last_interrupted_at TEXT
       )
     ''');
     await db.execute('''
@@ -105,9 +110,14 @@ class TransectDatabase {
 
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
   /// order -- 1 -> 2 added `site_name`/`observer_name`, 2 -> 3 added
-  /// `video_path`. Nullable `ALTER TABLE ... ADD COLUMN` is safe on
-  /// existing rows (they read back as `null`, matching
-  /// `TransectSession.fromMap`'s already-nullable handling of all three).
+  /// `video_path`, 3 -> 4 added the checkpoint/interruption columns.
+  /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
+  /// read back as `null`, matching `TransectSession.fromMap`'s
+  /// already-nullable handling of every added column).
+  ///
+  /// No constraint migration was needed for sub-plan 11's repeated colony
+  /// writes: `UNIQUE(session_id, track_id)` has been in `_createSchema`
+  /// since v1, so `upsertColony` has always really upserted.
   static Future<void> _upgradeSchema(Database db, int oldVersion) async {
     if (oldVersion < 2) {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN site_name TEXT');
@@ -115,6 +125,12 @@ class TransectDatabase {
     }
     if (oldVersion < 3) {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN video_path TEXT');
+    }
+    if (oldVersion < 4) {
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN last_checkpoint_at TEXT');
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN interruption_count INTEGER');
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN first_interrupted_at TEXT');
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN last_interrupted_at TEXT');
     }
   }
 
@@ -159,6 +175,52 @@ class TransectDatabase {
       map,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  /// [upsertColony] for many records in one transaction -- all or nothing,
+  /// and one round trip instead of N. Used by `SessionCheckpointer`
+  /// (sub-plan 11), where a checkpoint on `AppLifecycleState.paused` may
+  /// have only a few seconds before iOS suspends or kills the app, and by
+  /// the Live screen's finalize.
+  Future<void> upsertColonies(List<TrackedColonyRecord> records) async {
+    if (records.isEmpty) return;
+    await _db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final record in records) {
+        batch.insert(
+          _coloniesTable,
+          record.toMap()..remove('id'),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// Stamps when Live last checkpointed this session's colonies (sub-plan
+  /// 11) -- what Summary reports as "the app stopped at HH:MM" for a
+  /// session that never reached End Transect.
+  Future<void> recordCheckpoint(int sessionId, DateTime at) async {
+    await _db.update(
+      _sessionsTable,
+      {'last_checkpoint_at': at.toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [sessionId],
+    );
+  }
+
+  /// Counts one interruption (Live left the foreground), keeping the first
+  /// interruption time and moving the last -- sub-plan 11 step 3. A single
+  /// UPDATE, so the increment can't race a concurrent read-modify-write.
+  Future<void> recordInterruption(int sessionId, DateTime at) async {
+    final stamp = at.toIso8601String();
+    await _db.rawUpdate('''
+      UPDATE $_sessionsTable
+      SET interruption_count = COALESCE(interruption_count, 0) + 1,
+          first_interrupted_at = COALESCE(first_interrupted_at, ?),
+          last_interrupted_at = ?
+      WHERE id = ?
+    ''', [stamp, stamp, sessionId]);
   }
 
   Future<List<TrackedColonyRecord>> colonyRowsForSession(

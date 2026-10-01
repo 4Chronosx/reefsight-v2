@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
+import 'package:sqflite/sqflite.dart' show openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -265,6 +269,119 @@ void main() {
           summaries.firstWhere((s) => s.session.id == inProgressId);
 
       expect(inProgress.session.endedAt, isNull);
+    });
+  });
+
+  // Sub-plan 11 steps 2-3: checkpoint/interruption columns (schema v4).
+  group('TransectDatabase schema v4', () {
+    test('upgrading a v3 file keeps existing rows; new columns read back null',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v3_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v3 schema exactly as `_createSchema` wrote it before v4.
+      final v3 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 3,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT
+            )
+          ''');
+          await db.execute('''
+            CREATE TABLE tracked_colonies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id INTEGER NOT NULL REFERENCES transect_sessions(id),
+              track_id INTEGER NOT NULL,
+              species TEXT,
+              species_confidence REAL,
+              health_label TEXT,
+              health_history TEXT NOT NULL,
+              size_px REAL,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              mask_path TEXT,
+              UNIQUE(session_id, track_id)
+            )
+          ''');
+        },
+      );
+      final sessionId = await v3.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'site_name': 'Marigondon Reef',
+      });
+      await v3.close();
+
+      final db = await TransectDatabase.open(dir.path);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.siteName, 'Marigondon Reef');
+      expect(stored.lastCheckpointAt, isNull);
+      expect(stored.interruptionCount, isNull);
+      expect(stored.firstInterruptedAt, isNull);
+      expect(stored.lastInterruptedAt, isNull);
+
+      await db.recordCheckpoint(sessionId, DateTime.utc(2026, 1, 1, 0, 5));
+      await db.recordInterruption(sessionId, DateTime.utc(2026, 1, 1, 0, 6));
+      final updated = await db.sessionById(sessionId);
+      expect(updated!.lastCheckpointAt, DateTime.utc(2026, 1, 1, 0, 5));
+      expect(updated.interruptionCount, 1);
+
+      // Closed before the temp dir is deleted (Windows holds the file open).
+      await db.close();
+    });
+
+    test('upsertColonies writes every record, and replaces on '
+        '(session_id, track_id)', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 10),
+      );
+
+      TrackedColonyRecord colony(int trackId, {String? maskPath}) =>
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: trackId,
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+            maskPath: maskPath,
+          );
+
+      await db.upsertColonies([colony(1), colony(2)]);
+      await db.upsertColonies([colony(2, maskPath: 'm/2.png'), colony(3)]);
+
+      final rows = await db.colonyRowsForSession(sessionId);
+      expect(rows.map((r) => r.trackId), unorderedEquals([1, 2, 3]));
+      expect(rows.firstWhere((r) => r.trackId == 2).maskPath, 'm/2.png');
+    });
+
+    test('recordInterruption keeps the first time and moves the last', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 10),
+      );
+
+      await db.recordInterruption(sessionId, DateTime.utc(2026, 1, 1, 0, 3));
+      await db.recordInterruption(sessionId, DateTime.utc(2026, 1, 1, 0, 9));
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.interruptionCount, 2);
+      expect(stored.firstInterruptedAt, DateTime.utc(2026, 1, 1, 0, 3));
+      expect(stored.lastInterruptedAt, DateTime.utc(2026, 1, 1, 0, 9));
     });
   });
 }

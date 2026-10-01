@@ -152,6 +152,7 @@ class _ReportBody extends StatelessWidget {
                   fontSize: 12,
                 ),
               ),
+              _SessionNotice(report: report),
               // Shared header, so the recording is reachable from either
               // tab -- not only the bottom of the Technical tab's list.
               if (video != null)
@@ -175,6 +176,88 @@ class _ReportBody extends StatelessWidget {
         ),
         Expanded(child: _ReportTabs(report: report, videoFile: video)),
       ],
+    );
+  }
+}
+
+/// Sub-plan 11 step 4: says what was kept when Live never reached End
+/// Transect (crash, iOS kill, long background stay), and how often Live was
+/// interrupted. Labels only -- sessions stay immutable (Spec, "Cloud
+/// sync"), so an incomplete session is never closed or edited afterwards.
+/// The stop time is the last checkpoint (`SessionCheckpointer`), the latest
+/// moment the colony rows are known to reflect.
+class _SessionNotice extends StatelessWidget {
+  const _SessionNotice({required this.report});
+
+  final TransectReport report;
+
+  static String _hhmm(DateTime at) {
+    final local = at.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  static String _times(int count) => switch (count) {
+        1 => 'once',
+        2 => 'twice',
+        _ => '$count times',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final session = report.session;
+    final lines = <String>[];
+
+    if (session.endedAt == null) {
+      final count = report.totalColonies;
+      final colonies = count == 1 ? '1 colony was' : '$count colonies were';
+      final stoppedAt = session.lastCheckpointAt;
+      lines.add(
+        stoppedAt == null
+            ? 'Incomplete — $colonies saved.'
+            : 'Incomplete — the app stopped at ${_hhmm(stoppedAt)}. '
+                '$colonies saved up to then.',
+      );
+    }
+    final interruptions = session.interruptionCount ?? 0;
+    if (interruptions > 0) {
+      lines.add(
+        'The app was interrupted ${_times(interruptions)} during this transect.',
+      );
+    }
+    if (lines.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.amber.withValues(alpha: 0.6)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded, size: 18, color: Colors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final line in lines)
+                  Text(
+                    line,
+                    style: const TextStyle(
+                      color: AppColors.onSurface,
+                      fontSize: 13,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

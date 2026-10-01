@@ -19,7 +19,12 @@ class DiagnosticsOverlay extends StatelessWidget {
     required this.healthAggregator,
     required this.sizesPx,
     this.loopSummary,
+    this.checkpointFailures = 0,
   });
+
+  /// Failed colony checkpoints this session (`SessionCheckpointer`,
+  /// sub-plan 11) -- a data write failing must be visible, not swallowed.
+  final int checkpointFailures;
 
   final double? segProcessingMs;
 
@@ -51,6 +56,15 @@ class DiagnosticsOverlay extends StatelessWidget {
             Text(
               loopSummary!,
               style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          if (checkpointFailures > 0)
+            Text(
+              'checkpoint failed ×$checkpointFailures',
+              style: const TextStyle(
+                color: Colors.redAccent,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           for (final track in tracks)
             Text(

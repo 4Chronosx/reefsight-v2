@@ -19,6 +19,10 @@ class TransectSession {
     this.siteName,
     this.observerName,
     this.videoPath,
+    this.lastCheckpointAt,
+    this.interruptionCount,
+    this.firstInterruptedAt,
+    this.lastInterruptedAt,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -47,6 +51,20 @@ class TransectSession {
   /// killed mid-dive).
   final String? videoPath;
 
+  /// When `SessionCheckpointer` last wrote this session's colony rows during
+  /// Live (sub-plan 11). For an incomplete session (`endedAt == null`) this
+  /// is the best record of when the app stopped. `null` before the first
+  /// checkpoint, and on every session recorded before schema v4.
+  final DateTime? lastCheckpointAt;
+
+  /// How many times Live left the foreground (phone call, notification
+  /// centre, app switch) during this transect, with the first and last of
+  /// those times -- sub-plan 11 step 3. `null` (not 0) if it never happened
+  /// or the session predates schema v4.
+  final int? interruptionCount;
+  final DateTime? firstInterruptedAt;
+  final DateTime? lastInterruptedAt;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
@@ -56,6 +74,10 @@ class TransectSession {
     String? siteName,
     String? observerName,
     String? videoPath,
+    DateTime? lastCheckpointAt,
+    int? interruptionCount,
+    DateTime? firstInterruptedAt,
+    DateTime? lastInterruptedAt,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -66,6 +88,10 @@ class TransectSession {
       siteName: siteName ?? this.siteName,
       observerName: observerName ?? this.observerName,
       videoPath: videoPath ?? this.videoPath,
+      lastCheckpointAt: lastCheckpointAt ?? this.lastCheckpointAt,
+      interruptionCount: interruptionCount ?? this.interruptionCount,
+      firstInterruptedAt: firstInterruptedAt ?? this.firstInterruptedAt,
+      lastInterruptedAt: lastInterruptedAt ?? this.lastInterruptedAt,
     );
   }
 
@@ -80,7 +106,14 @@ class TransectSession {
         'site_name': siteName,
         'observer_name': observerName,
         'video_path': videoPath,
+        'last_checkpoint_at': lastCheckpointAt?.toIso8601String(),
+        'interruption_count': interruptionCount,
+        'first_interrupted_at': firstInterruptedAt?.toIso8601String(),
+        'last_interrupted_at': lastInterruptedAt?.toIso8601String(),
       };
+
+  static DateTime? _parseNullable(Object? raw) =>
+      raw == null ? null : DateTime.parse(raw as String);
 
   static TransectSession fromMap(Map<String, Object?> map) {
     final endedAtRaw = map['ended_at'] as String?;
@@ -93,6 +126,10 @@ class TransectSession {
       siteName: map['site_name'] as String?,
       observerName: map['observer_name'] as String?,
       videoPath: map['video_path'] as String?,
+      lastCheckpointAt: _parseNullable(map['last_checkpoint_at']),
+      interruptionCount: map['interruption_count'] as int?,
+      firstInterruptedAt: _parseNullable(map['first_interrupted_at']),
+      lastInterruptedAt: _parseNullable(map['last_interrupted_at']),
     );
   }
 }

@@ -157,4 +157,126 @@ void main() {
       findsOneWidget,
     );
   });
+
+  // Sub-plan 11 step 4: an incomplete session is labelled with what was
+  // kept, not hidden or edited.
+  group('incomplete session banner', () {
+    Future<int> seed(
+      TransectDatabase db, {
+      DateTime? endedAt,
+      DateTime? lastCheckpointAt,
+      int interruptions = 0,
+      int colonies = 2,
+    }) async {
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 10, 1, 9),
+          endedAt: endedAt,
+          tapeLengthMeters: 50,
+        ),
+      );
+      for (var i = 0; i < colonies; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: i + 1,
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 10, 1, 9),
+            lastSeenAt: DateTime.utc(2026, 10, 1, 9),
+          ),
+        );
+      }
+      if (lastCheckpointAt != null) {
+        await db.recordCheckpoint(sessionId, lastCheckpointAt);
+      }
+      for (var i = 0; i < interruptions; i++) {
+        await db.recordInterruption(sessionId, DateTime.utc(2026, 10, 1, 9, i));
+      }
+      return sessionId;
+    }
+
+    Future<void> pumpSummary(
+      WidgetTester tester,
+      TransectDatabase db,
+      int sessionId,
+    ) async {
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home:
+                SummaryScreen(sessionId: sessionId, openDatabase: () async => db),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('says when the app stopped and how many colonies were saved',
+        (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final checkpointAt = DateTime.utc(2026, 10, 1, 9, 42);
+      final sessionId = await seed(db, lastCheckpointAt: checkpointAt);
+
+      await pumpSummary(tester, db, sessionId);
+
+      final local = checkpointAt.toLocal();
+      final hhmm = '${local.hour.toString().padLeft(2, '0')}:'
+          '${local.minute.toString().padLeft(2, '0')}';
+      expect(
+        find.text('Incomplete — the app stopped at $hhmm. '
+            '2 colonies were saved up to then.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('without a checkpoint time, still says what was saved',
+        (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(db, colonies: 1);
+
+      await pumpSummary(tester, db, sessionId);
+
+      expect(find.text('Incomplete — 1 colony was saved.'), findsOneWidget);
+    });
+
+    testWidgets('reports how often the app was interrupted', (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(
+        db,
+        lastCheckpointAt: DateTime.utc(2026, 10, 1, 9, 42),
+        interruptions: 2,
+      );
+
+      await pumpSummary(tester, db, sessionId);
+
+      expect(
+        find.text('The app was interrupted twice during this transect.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a completed session shows no banner', (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(
+        db,
+        endedAt: DateTime.utc(2026, 10, 1, 9, 50),
+        lastCheckpointAt: DateTime.utc(2026, 10, 1, 9, 42),
+        interruptions: 1,
+      );
+
+      await pumpSummary(tester, db, sessionId);
+
+      expect(find.textContaining('Incomplete'), findsNothing);
+      // Interruptions are still worth knowing on a finished survey.
+      expect(
+        find.text('The app was interrupted once during this transect.'),
+        findsOneWidget,
+      );
+    });
+  });
 }

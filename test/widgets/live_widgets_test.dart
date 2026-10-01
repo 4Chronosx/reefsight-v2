@@ -145,6 +145,28 @@ void main() {
     expect(find.text('ev/s 8.0  upd/s 8.0'), findsOneWidget);
   });
 
+  // Sub-plan 11: a failed checkpoint is counted on the overlay, not
+  // swallowed.
+  testWidgets('DiagnosticsOverlay shows checkpoint failures only when > 0',
+      (tester) async {
+    Widget overlay(int failures) => _wrapLandscape(
+      tester,
+      DiagnosticsOverlay(
+        segProcessingMs: 12.3,
+        tracks: const [],
+        healthAggregator: HealthAggregator(),
+        sizesPx: const {},
+        checkpointFailures: failures,
+      ),
+    );
+
+    await tester.pumpWidget(overlay(0));
+    expect(find.textContaining('checkpoint failed'), findsNothing);
+
+    await tester.pumpWidget(overlay(3));
+    expect(find.text('checkpoint failed ×3'), findsOneWidget);
+  });
+
   testWidgets(
       'end-transect sheet resolves true only after "End transect" is tapped, '
       'not merely by opening it', (tester) async {
