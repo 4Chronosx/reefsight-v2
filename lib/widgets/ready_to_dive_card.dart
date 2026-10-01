@@ -23,16 +23,14 @@ Color statusColor(CheckStatus status) => switch (status) {
 /// check, each with its status and one line of reason. Display only -- it
 /// never disables Start (decision 1: warn, never block).
 class ReadyToDiveCard extends StatelessWidget {
-  const ReadyToDiveCard({super.key, required this.health});
+  const ReadyToDiveCard({super.key, required this.health, required this.entryPosition});
 
   /// `null` until `DeviceHealthMonitor`'s first reading.
   final DeviceHealth? health;
 
-  /// Placeholder until sub-plan 12 adds the GPS entry fix to Setup.
-  static const _entryPosition = CheckResult(
-    CheckStatus.unavailable,
-    'Not recorded. GPS entry fix not available yet.',
-  );
+  /// Sub-plan 12's entry fix, from `entryPositionCheck`. `null` while the
+  /// first fix is still being acquired.
+  final CheckResult? entryPosition;
 
   @override
   Widget build(BuildContext context) {
@@ -45,7 +43,7 @@ class ReadyToDiveCard extends StatelessWidget {
           _CheckRow(label: 'Storage', check: health?.storage),
           _CheckRow(label: 'Battery', check: health?.battery),
           _CheckRow(label: 'Heat', check: health?.thermal),
-          const _CheckRow(label: 'Entry position', check: _entryPosition),
+          _CheckRow(label: 'Entry position', check: entryPosition),
         ],
       ),
     );

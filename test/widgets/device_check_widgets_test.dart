@@ -23,20 +23,26 @@ DeviceHealth _health({
 
 Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
+const _entryOk = CheckResult(CheckStatus.ok, '±8 m · 10.2541° N, 123.9502° E');
+const _entryMissing = CheckResult(
+  CheckStatus.warn,
+  "No entry position — it'll be missing from the report.",
+);
+
 Finder _statusIcon(String label) => find.byKey(ValueKey('device-check-$label'));
 
 void main() {
   group('ReadyToDiveCard', () {
     testWidgets('shows "Checking…" for every device check before the first reading',
         (tester) async {
-      await tester.pumpWidget(_wrap(const ReadyToDiveCard(health: null)));
+      await tester.pumpWidget(_wrap(const ReadyToDiveCard(health: null, entryPosition: null)));
 
-      expect(find.text('Checking…'), findsNWidgets(3));
+      expect(find.text('Checking…'), findsNWidgets(4));
     });
 
     testWidgets('lists storage, battery, heat and entry position with reasons',
         (tester) async {
-      await tester.pumpWidget(_wrap(ReadyToDiveCard(health: _health(battery: 30))));
+      await tester.pumpWidget(_wrap(ReadyToDiveCard(health: _health(battery: 30), entryPosition: _entryOk)));
 
       expect(find.text('Storage'), findsOneWidget);
       expect(find.text('Battery'), findsOneWidget);
@@ -45,12 +51,14 @@ void main() {
       expect(find.text('64.0 GB free'), findsOneWidget);
       expect(find.text('30%, may not last a long transect.'), findsOneWidget);
       expect(find.text('Normal'), findsOneWidget);
+      expect(find.text(_entryOk.reason), findsOneWidget);
     });
 
     testWidgets('each row shows its own status', (tester) async {
       await tester.pumpWidget(
         _wrap(
           ReadyToDiveCard(
+            entryPosition: _entryMissing,
             health: _health(
               freeBytes: 1000,
               battery: 30,
@@ -71,6 +79,11 @@ void main() {
       expect(
         tester.widget<Icon>(_statusIcon('Heat')).icon,
         statusIcon(CheckStatus.unavailable),
+      );
+      // Sub-plan 12: no entry fix warns; it never blocks.
+      expect(
+        tester.widget<Icon>(_statusIcon('Entry position')).icon,
+        statusIcon(CheckStatus.warn),
       );
     });
   });

@@ -129,6 +129,15 @@ created on one phone and never edited after `ended_at`. Sync is therefore **appe
 read-only download**, never two-way merging. Uploading the same session twice is a no-op (idempotent on
 its UUID). This removes the hardest part of offline-first sync.
 
+**The one exception: the exit GPS fix (sub-plan 12, decision 3).** The exit fix is recorded from Summary
+after surfacing, so it can land after End Transect, and after this survey has already been uploaded.
+It's the only field ever written to a session after `ended_at`, and it's write-once: the five `exit_*`
+columns go from null to a value exactly once (`TransectDatabase.recordExitFix` guards with
+`exit_lat IS NULL` in the same UPDATE) and are never changed after that. So sync needs exactly one
+later update: if the uploaded copy has no exit fix and the local one does, send those five columns.
+The Worker should accept that update only while its own `exit_lat` is null, which keeps it write-once
+and idempotent. Every other column stays immutable once uploaded.
+
 **D. There's no delete, locally or in the cloud.** This follows sub-plan 6's decision 8: surveys are
 irreversible field data. The Worker exposes no delete endpoint. Only the account owner can clean up
 by hand, via Wrangler or the dashboard.

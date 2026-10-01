@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
@@ -6,6 +8,10 @@ import 'package:reefsight_mobile/services/device_info.dart';
 import 'package:reefsight_mobile/widgets/ready_to_dive_card.dart';
 
 import '../support/fake_device.dart';
+import '../support/fake_location.dart';
+import 'package:reefsight_mobile/services/geo_fix.dart';
+import 'package:reefsight_mobile/services/location_provider.dart';
+import 'package:reefsight_mobile/widgets/geo_fix_panel.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -27,6 +33,9 @@ Future<void> _pumpSetup(
   WidgetTester tester,
   TransectDatabase db, {
   FakeDevice? device,
+  LocationProvider? location,
+  StartTransect? onStart,
+  bool settle = true,
 }) async {
   final fake = device ?? FakeDevice();
   await tester.pumpWidget(
@@ -36,10 +45,28 @@ Future<void> _pumpSetup(
         storageInfo: fake,
         batteryInfo: fake,
         thermalInfo: fake,
+        locationProvider: location ?? FakeLocationProvider.fix(),
+        startTransect: onStart ?? (_, _) {},
       ),
     ),
   );
+  if (settle) await tester.pumpAndSettle();
+}
+
+/// A tall test surface, so every Setup card is built at once and the GPS
+/// card's buttons can be tapped without scrolling the lazy list.
+void _useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 2400);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+Future<void> _enterManualFix(WidgetTester tester, String lat, String lon) async {
+  await tester.tap(find.text('Enter manually'));
   await tester.pumpAndSettle();
+  await tester.enterText(find.byKey(const ValueKey('manual-lat')), lat);
+  await tester.enterText(find.byKey(const ValueKey('manual-lon')), lon);
+  await tester.pump();
 }
 
 /// Setup's `ListView` is a lazy sliver list -- on the default 800x600 test
@@ -213,13 +240,151 @@ void main() {
       );
       await _revealStartButton(tester);
 
-      for (final label in ['Storage', 'Battery', 'Heat', 'Entry position']) {
+      for (final label in ['Storage', 'Battery', 'Heat']) {
         expect(
           tester.widget<Icon>(find.byKey(ValueKey('device-check-$label'))).icon,
           statusIcon(CheckStatus.unavailable),
           reason: label,
         );
       }
+    });
+  });
+
+  // Sub-plan 12 tests: "success shows the fix and it's stored on Start;
+  // failure shows manual entry, and the manual fix is stored with
+  // source: manual; Start stays enabled with no fix." "Stored" here is
+  // what Setup hands to Live via the injected `startTransect` -- Live's
+  // camera can't run under `flutter test`; the insert itself is covered by
+  // transect_database_test.dart's schema v6 group.
+  group('Entry position (sub-plan 12)', () {
+    testWidgets('a GPS fix is shown and handed to Live on Start', (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      TransectStart? started;
+
+      await _pumpSetup(tester, db, onStart: (_, start) => started = start);
+
+      // In the Entry position card and in the "Ready to dive" row.
+      expect(find.text(formatFix(testGpsFix())), findsNWidgets(2));
+      expect(
+        tester.widget<Icon>(find.byKey(const ValueKey('device-check-Entry position'))).icon,
+        statusIcon(CheckStatus.ok),
+      );
+
+      await tester.tap(_startButton());
+      await tester.pump();
+
+      expect(started!.entryFix, testGpsFix());
+      expect(started!.tapeLengthMeters, 50);
+    });
+
+    testWidgets('shows Acquiring… and Checking… until the fix arrives', (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final location = FakeLocationProvider.fix()..hold = Completer<void>();
+
+      await _pumpSetup(tester, db, location: location, settle: false);
+      await tester.pump();
+
+      expect(find.text('Acquiring…'), findsOneWidget);
+      expect(find.text("No entry position — it'll be missing from the report."), findsNothing);
+      expect(tester.widget<ElevatedButton>(_startButton()).onPressed, isNotNull);
+
+      location.hold!.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Acquiring…'), findsNothing);
+      expect(find.text(formatFix(testGpsFix())), findsNWidgets(2));
+    });
+
+    testWidgets('a failure offers manual entry; the manual fix is handed to Live',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      TransectStart? started;
+      const failure = LocationFailure(LocationFailureKind.permissionDenied);
+
+      await _pumpSetup(
+        tester,
+        db,
+        location: FakeLocationProvider([failure]),
+        onStart: (_, start) => started = start,
+      );
+
+      expect(find.text(failure.reason), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+
+      await _enterManualFix(tester, '10.2601', '123.9555');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_startButton());
+      await tester.pump();
+
+      final fix = started!.entryFix!;
+      expect(fix.source, GeoFixSource.manual);
+      expect(fix.lat, 10.2601);
+      expect(fix.lon, 123.9555);
+      expect(fix.accuracyM, isNull);
+      expect(find.text(formatFix(fix)), findsNWidgets(2));
+    });
+
+    testWidgets('no fix warns but leaves Start enabled, and starts with none',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      TransectStart? started;
+
+      await _pumpSetup(
+        tester,
+        db,
+        location: FakeLocationProvider.failure(LocationFailureKind.servicesOff),
+        onStart: (_, start) => started = start,
+      );
+
+      expect(
+        find.text("No entry position — it'll be missing from the report."),
+        findsOneWidget,
+      );
+      expect(
+        tester.widget<Icon>(find.byKey(const ValueKey('device-check-Entry position'))).icon,
+        statusIcon(CheckStatus.warn),
+      );
+      expect(tester.widget<ElevatedButton>(_startButton()).onPressed, isNotNull);
+
+      await tester.tap(_startButton());
+      await tester.pump();
+      expect(started, isNotNull);
+      expect(started!.entryFix, isNull);
+    });
+
+    testWidgets('manual entry rejects out-of-range values and hints far from Cordova',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+
+      await _pumpSetup(
+        tester,
+        db,
+        location: FakeLocationProvider.failure(),
+      );
+
+      Finder saveButton() => find.widgetWithText(TextButton, 'Save');
+
+      // Swapped lat/lon: latitude 123.95 is out of range.
+      await _enterManualFix(tester, '123.95', '10.25');
+      expect(tester.widget<TextButton>(saveButton()).onPressed, isNull);
+
+      // A dropped minus sign elsewhere is valid but far: hint, still savable.
+      await tester.enterText(find.byKey(const ValueKey('manual-lat')), '10.25');
+      await tester.enterText(find.byKey(const ValueKey('manual-lon')), '-123.95');
+      await tester.pump();
+      expect(find.text(farFromCordovaHint), findsOneWidget);
+      expect(tester.widget<TextButton>(saveButton()).onPressed, isNotNull);
     });
   });
 }

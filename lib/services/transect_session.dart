@@ -1,4 +1,5 @@
 import 'device_checks.dart';
+import 'geo_fix.dart';
 
 /// One transect run: identity plus the physical tape length that serves as
 /// the density denominator.
@@ -27,6 +28,8 @@ class TransectSession {
     this.lastInterruptedAt,
     this.thermalPeak,
     this.thermalRiseCount,
+    this.entryFix,
+    this.exitFix,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -76,6 +79,14 @@ class TransectSession {
   final ThermalLevel? thermalPeak;
   final int? thermalRiseCount;
 
+  /// Sub-plan 12: the Spec's surface GPS fixes. [entryFix] is taken on
+  /// Setup before descent and stored at insert; [exitFix] is recorded from
+  /// Summary after surfacing (`TransectDatabase.recordExitFix`, write-once
+  /// -- the only field written after End Transect). Either may be `null`:
+  /// a missing fix never blocks a dive. Neither feeds any metric.
+  final GeoFix? entryFix;
+  final GeoFix? exitFix;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
@@ -91,6 +102,8 @@ class TransectSession {
     DateTime? lastInterruptedAt,
     ThermalLevel? thermalPeak,
     int? thermalRiseCount,
+    GeoFix? entryFix,
+    GeoFix? exitFix,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -107,6 +120,8 @@ class TransectSession {
       lastInterruptedAt: lastInterruptedAt ?? this.lastInterruptedAt,
       thermalPeak: thermalPeak ?? this.thermalPeak,
       thermalRiseCount: thermalRiseCount ?? this.thermalRiseCount,
+      entryFix: entryFix ?? this.entryFix,
+      exitFix: exitFix ?? this.exitFix,
     );
   }
 
@@ -127,6 +142,8 @@ class TransectSession {
         'last_interrupted_at': lastInterruptedAt?.toIso8601String(),
         'thermal_peak': thermalPeak?.name,
         'thermal_rise_count': thermalRiseCount,
+        ...entryFix?.toColumns('entry') ?? GeoFix.nullColumns('entry'),
+        ...exitFix?.toColumns('exit') ?? GeoFix.nullColumns('exit'),
       };
 
   static DateTime? _parseNullable(Object? raw) =>
@@ -149,6 +166,8 @@ class TransectSession {
       lastInterruptedAt: _parseNullable(map['last_interrupted_at']),
       thermalPeak: ThermalLevel.values.asNameMap()[map['thermal_peak']],
       thermalRiseCount: map['thermal_rise_count'] as int?,
+      entryFix: GeoFix.fromColumns(map, 'entry'),
+      exitFix: GeoFix.fromColumns(map, 'exit'),
     );
   }
 }

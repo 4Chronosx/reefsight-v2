@@ -11,6 +11,7 @@ import '../services/bleaching_classifier.dart';
 import '../services/colony_size.dart';
 import '../services/device_health_monitor.dart';
 import '../services/device_info.dart';
+import '../services/geo_fix.dart';
 import '../services/health_aggregator.dart';
 import '../services/health_history_recorder.dart';
 import '../services/live_frame_processor.dart';
@@ -61,6 +62,7 @@ class LiveTransectScreen extends StatefulWidget {
     required this.tapeLengthMeters,
     this.siteName,
     this.observerName,
+    this.entryFix,
     this.screenAwake = const WakelockScreenAwake(),
     this.storageInfo = const PlatformDeviceInfo(),
     this.batteryInfo = const BatteryPlusInfo(),
@@ -75,6 +77,10 @@ class LiveTransectScreen extends StatefulWidget {
   final double tapeLengthMeters;
   final String? siteName;
   final String? observerName;
+
+  /// Sub-plan 12: the surface fix Setup took before descent, stored with
+  /// the session at insert. `null` if there was none -- never blocks.
+  final GeoFix? entryFix;
 
   /// Keeps the screen from auto-locking for exactly this Live session
   /// (sub-plan 11 step 1). Injectable for tests.
@@ -252,6 +258,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
           tapeLengthMeters: widget.tapeLengthMeters,
           siteName: widget.siteName,
           observerName: widget.observerName,
+          entryFix: widget.entryFix,
         ),
       );
       _db = db;

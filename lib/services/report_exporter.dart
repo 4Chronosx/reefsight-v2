@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:csv/csv.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'geo_fix.dart';
 import 'tracked_colony_record.dart';
 import 'transect_session.dart';
 
@@ -57,32 +58,99 @@ class ReportExporter {
     return trimmed.replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_');
   }
 
-  static Future<String> exportCsv({
-    required String outputDirectory,
-    required TransectSession session,
-    required List<TrackedColonyRecord> colonies,
-  }) async {
-    final rows = <List<dynamic>>[
-      csvHeaders,
-      ...colonies.map(_csvRow),
-    ];
-    final csvString = const ListToCsvConverter().convert(rows);
-
+  /// `reefsight_<site>_<start time>` -- shared by the colony CSV and the
+  /// session CSV, so the two files from one transect sort together.
+  static String _baseName(TransectSession session) {
     final timestamp = session.startedAt
         .toIso8601String()
         .replaceAll(':', '-')
         .replaceAll('.', '-')
         .substring(0, 19);
-    final filename = 'reefsight_${_sanitizeForFilename(session.siteName)}_$timestamp.csv';
+    return 'reefsight_${_sanitizeForFilename(session.siteName)}_$timestamp';
+  }
 
+  static Future<String> _write(
+    String outputDirectory,
+    String filename,
+    List<List<dynamic>> rows,
+  ) async {
     final file = File('$outputDirectory/$filename');
-    await file.writeAsString(csvString);
+    await file.writeAsString(const ListToCsvConverter().convert(rows));
     return file.path;
   }
 
-  static Future<void> shareCsv(String filePath) async {
+  static Future<String> exportCsv({
+    required String outputDirectory,
+    required TransectSession session,
+    required List<TrackedColonyRecord> colonies,
+  }) {
+    return _write(outputDirectory, '${_baseName(session)}.csv', [
+      csvHeaders,
+      ...colonies.map(_csvRow),
+    ]);
+  }
+
+  /// Sub-plan 12 step 5: the session CSV's columns. Times are ISO-8601 UTC;
+  /// a missing value is an empty cell. The distance is the entry-exit QA
+  /// check, never a metric.
+  static const List<String> sessionCsvHeaders = [
+    'Site',
+    'Observer',
+    'Tape Length (m)',
+    'Belt Width (m)',
+    'Started At',
+    'Ended At',
+    'Entry Lat',
+    'Entry Lon',
+    'Entry Accuracy (m)',
+    'Entry At',
+    'Entry Source',
+    'Exit Lat',
+    'Exit Lon',
+    'Exit Accuracy (m)',
+    'Exit At',
+    'Exit Source',
+    'Entry-Exit Distance (m)',
+  ];
+
+  static List<dynamic> _fixCells(GeoFix? fix) => [
+        fix?.lat ?? '',
+        fix?.lon ?? '',
+        fix?.accuracyM ?? '',
+        fix?.at.toIso8601String() ?? '',
+        fix?.source.name ?? '',
+      ];
+
+  /// Sub-plan 12 step 5: a second, small `<base>_session.csv` -- one header
+  /// row and one data row with the session identity and both GPS fixes
+  /// (with source and accuracy). Kept separate so the colony CSV's columns
+  /// stay unchanged.
+  static Future<String> exportSessionCsv({
+    required String outputDirectory,
+    required TransectSession session,
+  }) {
+    final entry = session.entryFix;
+    final exit = session.exitFix;
+    return _write(outputDirectory, '${_baseName(session)}_session.csv', [
+      sessionCsvHeaders,
+      [
+        session.siteName ?? '',
+        session.observerName ?? '',
+        session.tapeLengthMeters,
+        session.beltWidthMeters,
+        session.startedAt.toIso8601String(),
+        session.endedAt?.toIso8601String() ?? '',
+        ..._fixCells(entry),
+        ..._fixCells(exit),
+        entry != null && exit != null ? distanceMeters(entry, exit).toStringAsFixed(1) : '',
+      ],
+    ]);
+  }
+
+  /// Shares the exported CSVs together (colony + session, sub-plan 12).
+  static Future<void> shareCsv(List<String> filePaths) async {
     await Share.shareXFiles(
-      [XFile(filePath)],
+      [for (final path in filePaths) XFile(path)],
       subject: 'ReefSight Transect Report',
       text: 'Coral reef health survey report from ReefSight.',
     );

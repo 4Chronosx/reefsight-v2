@@ -7,10 +7,15 @@ import 'package:path_provider/path_provider.dart';
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/device_checks.dart';
+import '../services/geo_fix.dart';
+import '../services/geo_fix_controller.dart';
+import '../services/location_provider.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/tracked_colony_record.dart';
+import '../services/transect_session.dart';
 import '../services/transect_video.dart';
+import '../widgets/geo_fix_panel.dart';
 import '../widgets/health_chip.dart';
 import 'app_shell.dart';
 import 'video_player_screen.dart';
@@ -28,6 +33,7 @@ class SummaryScreen extends StatefulWidget {
     super.key,
     required this.sessionId,
     this.openDatabase = openAppDatabase,
+    this.locationProvider = const GeolocatorLocationProvider(),
   });
 
   final int sessionId;
@@ -36,12 +42,24 @@ class SummaryScreen extends StatefulWidget {
   /// `path_provider` (no platform channel under `flutter test`).
   final DatabaseOpener openDatabase;
 
+  /// Sub-plan 12: the exit fix, recorded after surfacing. Injectable so
+  /// widget tests can use a fake.
+  final LocationProvider locationProvider;
+
   @override
   State<SummaryScreen> createState() => _SummaryScreenState();
 }
 
 class _SummaryScreenState extends State<SummaryScreen> {
-  late final Future<TransectReport> _reportFuture = _loadReport();
+  /// Reassigned after the exit fix is recorded (sub-plan 12), so the
+  /// header re-reads the stored, now read-only fix from the database.
+  late Future<TransectReport> _reportFuture = _loadReport();
+
+  void _reload() {
+    setState(() {
+      _reportFuture = _loadReport();
+    });
+  }
 
   /// The session's recording, if one exists on disk -- resolved alongside
   /// the report (see `transect_video.dart` for why the stored path alone
@@ -105,7 +123,21 @@ class _SummaryScreenState extends State<SummaryScreen> {
                 child: Text('Failed to load report: ${snapshot.error}'),
               );
             }
-            return _ReportBody(report: snapshot.data!, videoFile: _videoFile);
+            return _ReportBody(
+              report: snapshot.data!,
+              videoFile: _videoFile,
+              exitFix: snapshot.data!.session.exitFix == null
+                  ? _ExitFixSection(
+                      // Keyed by session so a reload never reuses a stale
+                      // controller.
+                      key: ValueKey('exit-fix-${widget.sessionId}'),
+                      session: snapshot.data!.session,
+                      openDatabase: widget.openDatabase,
+                      locationProvider: widget.locationProvider,
+                      onRecorded: _reload,
+                    )
+                  : null,
+            );
           },
         ),
       ),
@@ -117,10 +149,14 @@ class _SummaryScreenState extends State<SummaryScreen> {
 /// length" -- shared across both tabs, so it replaces the identity block the
 /// old Executive tab used to render at the top of its own `ListView`.
 class _ReportBody extends StatelessWidget {
-  const _ReportBody({required this.report, this.videoFile});
+  const _ReportBody({required this.report, this.videoFile, this.exitFix});
 
   final TransectReport report;
   final File? videoFile;
+
+  /// Sub-plan 12: the "Record exit position" section, only while the
+  /// session has no exit fix.
+  final Widget? exitFix;
 
   @override
   Widget build(BuildContext context) {
@@ -153,6 +189,8 @@ class _ReportBody extends StatelessWidget {
                   fontSize: 12,
                 ),
               ),
+              _FixesLine(session: session),
+              ?exitFix,
               _SessionNotice(report: report),
               // Shared header, so the recording is reachable from either
               // tab -- not only the bottom of the Technical tab's list.
@@ -177,6 +215,146 @@ class _ReportBody extends StatelessWidget {
         ),
         Expanded(child: _ReportTabs(report: report, videoFile: video)),
       ],
+    );
+  }
+}
+
+/// How long after a dive the phone's own GPS still counts as the exit
+/// position. Past this, Summary offers manual entry only: opening an old
+/// survey from Surveys must not stamp wherever the phone is today as the
+/// dive's exit.
+const kExitGpsWindow = Duration(hours: 12);
+
+/// Sub-plan 12 step 5: both surface fixes in the shared header, plus the
+/// entry-exit distance next to the tape length as a QA check for a human
+/// -- never used in any metric (density divides by the tape).
+class _FixesLine extends StatelessWidget {
+  const _FixesLine({required this.session});
+
+  final TransectSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = session.entryFix;
+    final exit = session.exitFix;
+    final style = TextStyle(
+      color: AppColors.onSurface.withValues(alpha: 0.6),
+      fontSize: 12,
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Entry: ${entry == null ? 'not recorded' : formatFix(entry)}', style: style),
+          if (exit != null) Text('Exit: ${formatFix(exit)}', style: style),
+          if (entry != null && exit != null)
+            Text(
+              'entry–exit ${distanceMeters(entry, exit).toStringAsFixed(0)} m apart'
+              ' · tape ${session.tapeLengthMeters.toStringAsFixed(0)} m',
+              key: const ValueKey('entry-exit-distance'),
+              style: style,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sub-plan 12 step 4: "Record exit position" for a session with no exit
+/// fix -- taken after surfacing, never at End Transect (tapped underwater,
+/// no signal). Acquiring only proposes a fix; nothing is stored until the
+/// diver taps Save, and `TransectDatabase.recordExitFix` stores it once
+/// (decision 3). Then [onRecorded] reloads the report and this section is
+/// replaced by the read-only fix in [_FixesLine].
+class _ExitFixSection extends StatefulWidget {
+  const _ExitFixSection({
+    super.key,
+    required this.session,
+    required this.openDatabase,
+    required this.locationProvider,
+    required this.onRecorded,
+  });
+
+  final TransectSession session;
+  final DatabaseOpener openDatabase;
+  final LocationProvider locationProvider;
+  final VoidCallback onRecorded;
+
+  @override
+  State<_ExitFixSection> createState() => _ExitFixSectionState();
+}
+
+class _ExitFixSectionState extends State<_ExitFixSection> {
+  late final GeoFixController _controller = GeoFixController(widget.locationProvider);
+  bool _saving = false;
+  String? _error;
+
+  /// GPS only within [kExitGpsWindow] of the session's last known moment
+  /// -- its end, else its last checkpoint, else its start.
+  bool get _allowGps {
+    final session = widget.session;
+    final last = session.endedAt ?? session.lastCheckpointAt ?? session.startedAt;
+    return DateTime.now().toUtc().difference(last) <= kExitGpsWindow;
+  }
+
+  Future<void> _save(GeoFix fix) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final db = await widget.openDatabase();
+      try {
+        // `false` means another write got there first; the reload shows
+        // whichever fix is stored either way.
+        await db.recordExitFix(widget.session.id!, fix);
+      } finally {
+        await db.close();
+      }
+      if (!mounted) return;
+      widget.onRecorded();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = 'Could not save the exit position: $error';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Exit position',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          ),
+          GeoFixPanel(
+            controller: _controller,
+            idleLabel: 'Record exit position',
+            allowGps: _allowGps,
+            gpsUnavailableNote:
+                "This dive ended over ${kExitGpsWindow.inHours} h ago, so the phone's "
+                'position now is not the exit position. Enter it from a log instead.',
+            confirmLabel: 'Save exit position',
+            onConfirm: _save,
+            saving: _saving,
+          ),
+          if (_error != null)
+            Text(_error!, style: const TextStyle(color: AppColors.bleached, fontSize: 12)),
+        ],
+      ),
     );
   }
 }
@@ -497,12 +675,17 @@ class _TechnicalTabState extends State<_TechnicalTab> {
         session: widget.report.session,
         colonies: widget.report.colonies,
       );
+      // Sub-plan 12 step 5: the session CSV (both GPS fixes) goes with it.
+      final sessionPath = await ReportExporter.exportSessionCsv(
+        outputDirectory: documentsDir.path,
+        session: widget.report.session,
+      );
       if (!mounted) return;
       setState(() {
         _csvPath = path;
         _isExporting = false;
       });
-      await ReportExporter.shareCsv(path);
+      await ReportExporter.shareCsv([path, sessionPath]);
     } catch (error) {
       if (!mounted) return;
       setState(() {

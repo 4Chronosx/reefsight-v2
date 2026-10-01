@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/device_checks.dart';
+import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:sqflite/sqflite.dart' show openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
@@ -462,6 +463,149 @@ void main() {
         'thermal_peak': 'molten',
       });
       expect(session.thermalPeak, isNull);
+    });
+  });
+
+  // Sub-plan 12: entry/exit GPS fixes (schema v6).
+  group('TransectDatabase schema v6', () {
+    final entry = GeoFix(
+      lat: 10.2501,
+      lon: 123.9502,
+      accuracyM: 8,
+      at: DateTime.utc(2026, 10, 2, 1),
+      source: GeoFixSource.gps,
+    );
+    final exit = GeoFix(
+      lat: 10.2505,
+      lon: 123.9502,
+      at: DateTime.utc(2026, 10, 2, 2),
+      source: GeoFixSource.manual,
+    );
+
+    test('upgrading a v5 file keeps existing rows; fixes read back null', () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v5_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v5 sessions table exactly as `_createSchema` wrote it before v6.
+      final v5 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 5,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT,
+              last_checkpoint_at TEXT,
+              interruption_count INTEGER,
+              first_interrupted_at TEXT,
+              last_interrupted_at TEXT,
+              thermal_peak TEXT,
+              thermal_rise_count INTEGER
+            )
+          ''');
+        },
+      );
+      final sessionId = await v5.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'site_name': 'Day-as',
+        'thermal_peak': 'fair',
+      });
+      await v5.close();
+
+      final db = await TransectDatabase.open(dir.path);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.siteName, 'Day-as');
+      expect(stored.thermalPeak, ThermalLevel.fair);
+      expect(stored.entryFix, isNull);
+      expect(stored.exitFix, isNull);
+
+      expect(await db.recordExitFix(sessionId, exit), isTrue);
+      expect((await db.sessionById(sessionId))!.exitFix, exit);
+
+      await db.close();
+    });
+
+    test('insertSession stores the entry fix; no exit fix yet', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 10, 2, 1, 5),
+          tapeLengthMeters: 50,
+          entryFix: entry,
+        ),
+      );
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.entryFix, entry);
+      expect(stored.exitFix, isNull);
+    });
+
+    test('a session started with no fix stores none', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 10, 2), tapeLengthMeters: 50),
+      );
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.entryFix, isNull);
+      expect(stored.exitFix, isNull);
+    });
+
+    test('recordExitFix writes once; a second write changes nothing', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 10, 2, 1, 5),
+          tapeLengthMeters: 50,
+          entryFix: entry,
+        ),
+      );
+      await db.closeSession(sessionId, DateTime.utc(2026, 10, 2, 1, 50));
+
+      expect(await db.recordExitFix(sessionId, exit), isTrue);
+      final second = GeoFix(
+        lat: 0,
+        lon: 0,
+        at: DateTime.utc(2026, 10, 3),
+        source: GeoFixSource.gps,
+      );
+      expect(await db.recordExitFix(sessionId, second), isFalse);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.exitFix, exit);
+      // The entry fix and session times are untouched.
+      expect(stored.entryFix, entry);
+      expect(stored.endedAt, DateTime.utc(2026, 10, 2, 1, 50));
+    });
+
+    test('listSessions carries the fixes', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 10, 2),
+          tapeLengthMeters: 50,
+          entryFix: entry,
+        ),
+      );
+      await db.recordExitFix(sessionId, exit);
+
+      final summary = (await db.listSessions()).single;
+      expect(summary.session.entryFix, entry);
+      expect(summary.session.exitFix, exit);
     });
   });
 }

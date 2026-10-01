@@ -47,6 +47,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>ReefSight uses the camera for live coral colony segmentation during dive transects.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>ReefSight records your position at the start and end of a transect.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

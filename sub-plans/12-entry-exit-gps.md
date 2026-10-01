@@ -93,3 +93,23 @@ pattern as v2/v3. In Dart, a `GeoFix` value class (`lat`, `lon`, `accuracyM?`, `
 - A transect started topside on a device stores an entry fix, and recording the exit after surfacing
   stores an exit fix. Both show on Summary and in the exported session CSV.
 - The Spec's coordinates line is implemented as written, and the 06 correction is recorded.
+
+## Implementation notes (2026-10-02)
+Implemented as written, except for the points below. Rationale: `../docs/entry-exit-gps-fixes.md`.
+- **Schema is v6, not v4.** Sub-plans 11 and 13 had already used v4 and v5. Ten nullable columns
+  (`entry_*`, `exit_*`) are added in `_upgradeSchema`'s `oldVersion < 6` block.
+- **Write-once is enforced in SQL.** `TransectDatabase.recordExitFix` is one
+  `UPDATE … WHERE id = ? AND exit_lat IS NULL`, and returns whether it stored anything.
+- **The missing-entry warning is in the "Ready to dive" card's Entry position row.** That was sub-plan
+  13's grey placeholder. Setup's GPS card and that row read one `GeoFixController`.
+- **Start goes through an injectable `startTransect` hook** (default `pushLiveTransect`), so widget
+  tests can check the `TransectStart` (including `entryFix`) without building Live's camera. Live
+  passes `entryFix` to `insertSession`. A fix that arrives after Start is tapped is dropped.
+- **GPS exit only within 12 h** (`kExitGpsWindow`) of the session's end, else its last checkpoint,
+  else its start. Older sessions offer manual entry only, so opening an old survey can't stamp today's
+  position as its exit. Acquiring only proposes a fix; nothing is stored until **Save exit position**.
+- **The session CSV adds `Entry-Exit Distance (m)`**, the same QA number as the Summary header.
+- `geolocator: ^14.0.2`. iOS `NSLocationWhenInUseUsageDescription`, Android FINE/COARSE location.
+- The 06 correction already existed before this work. Sub-plan 07 now has the write-once exit-fix note.
+- **Verified:** `dart analyze`: no issues; `flutter test`: 332 passed. A device check is still open:
+  entry fix topside → Summary → record exit → export, then check `_session.csv`.

@@ -77,6 +77,11 @@ dependencies:
   # thermal state come from a small platform channel in AppDelegate.swift.
   battery_plus: ^7.1.1
 
+  # Sub-plan 12 (entry/exit GPS): one topside fix at dive entry (Setup) and
+  # one at exit (Summary, after surfacing) -- the Spec's "surface GPS fix at
+  # dive entry/exit only". Never read during Live.
+  geolocator: ^14.0.2
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an

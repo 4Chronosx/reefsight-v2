@@ -2,6 +2,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 import 'device_checks.dart';
+import 'geo_fix.dart';
 import 'health_aggregator.dart';
 import 'session_summary.dart';
 import 'tracked_colony_record.dart';
@@ -32,8 +33,9 @@ class TransectDatabase {
   /// gain the new columns, or every subsequent `insertSession()` throws
   /// `no such column: ...`. 3 -> 4 added the checkpoint/interruption
   /// columns (sub-plan 11: live session safety). 4 -> 5 added the thermal
-  /// peak and rise count (sub-plan 13: pre-dive checks).
-  static const _schemaVersion = 5;
+  /// peak and rise count (sub-plan 13: pre-dive checks). 5 -> 6 added the
+  /// entry/exit GPS fix columns (sub-plan 12).
+  static const _schemaVersion = 6;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -91,7 +93,9 @@ class TransectDatabase {
         first_interrupted_at TEXT,
         last_interrupted_at TEXT,
         thermal_peak TEXT,
-        thermal_rise_count INTEGER
+        thermal_rise_count INTEGER,
+        ${_fixColumnsSql('entry')},
+        ${_fixColumnsSql('exit')}
       )
     ''');
     await db.execute('''
@@ -115,7 +119,8 @@ class TransectDatabase {
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
   /// order -- 1 -> 2 added `site_name`/`observer_name`, 2 -> 3 added
   /// `video_path`, 3 -> 4 added the checkpoint/interruption columns, 4 -> 5
-  /// added `thermal_peak`/`thermal_rise_count`.
+  /// added `thermal_peak`/`thermal_rise_count`, 5 -> 6 added the
+  /// `entry_*`/`exit_*` GPS fix columns.
   /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
   /// read back as `null`, matching `TransectSession.fromMap`'s
   /// already-nullable handling of every added column).
@@ -141,7 +146,27 @@ class TransectDatabase {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN thermal_peak TEXT');
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN thermal_rise_count INTEGER');
     }
+    if (oldVersion < 6) {
+      for (final prefix in ['entry', 'exit']) {
+        for (final column in _fixColumns(prefix)) {
+          await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN $column');
+        }
+      }
+    }
   }
+
+  /// Sub-plan 12's five columns per GPS fix -- names match
+  /// `GeoFix.toColumns`. `<prefix>_at` is ISO-8601 UTC, `<prefix>_source`
+  /// is `gps` or `manual`.
+  static List<String> _fixColumns(String prefix) => [
+        '${prefix}_lat REAL',
+        '${prefix}_lon REAL',
+        '${prefix}_accuracy_m REAL',
+        '${prefix}_at TEXT',
+        '${prefix}_source TEXT',
+      ];
+
+  static String _fixColumnsSql(String prefix) => _fixColumns(prefix).join(',\n        ');
 
   Future<int> insertSession(TransectSession session) async {
     final map = session.toMap()..remove('id');
@@ -242,6 +267,21 @@ class TransectDatabase {
       where: 'id = ?',
       whereArgs: [sessionId],
     );
+  }
+
+  /// Stores the exit GPS fix, recorded from Summary after surfacing --
+  /// sub-plan 12 decision 3. Write-once, and the only field written to a
+  /// survey after End Transect: the `exit_lat IS NULL` guard is in the
+  /// same UPDATE, so a second call (double tap, two Summary screens) can't
+  /// overwrite the first. Returns whether this call stored the fix.
+  Future<bool> recordExitFix(int sessionId, GeoFix fix) async {
+    final changed = await _db.update(
+      _sessionsTable,
+      fix.toColumns('exit'),
+      where: 'id = ? AND exit_lat IS NULL',
+      whereArgs: [sessionId],
+    );
+    return changed == 1;
   }
 
   Future<List<TrackedColonyRecord>> colonyRowsForSession(

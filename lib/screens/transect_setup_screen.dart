@@ -3,6 +3,10 @@ import 'package:flutter/material.dart';
 import '../services/app_database.dart';
 import '../services/device_health_monitor.dart';
 import '../services/device_info.dart';
+import '../services/geo_fix.dart';
+import '../services/geo_fix_controller.dart';
+import '../services/location_provider.dart';
+import '../widgets/geo_fix_panel.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/ready_to_dive_card.dart';
 import '../widgets/section_card.dart';
@@ -12,13 +16,48 @@ import 'live_transect_screen.dart';
 /// list per the sub-plan so the presets are trivial to change.
 const kTapeLengthPresetsMeters = [50, 75, 100];
 
+/// Everything Setup hands to Live when the diver taps Start.
+class TransectStart {
+  const TransectStart({
+    required this.tapeLengthMeters,
+    this.siteName,
+    this.observerName,
+    this.entryFix,
+  });
+
+  final double tapeLengthMeters;
+  final String? siteName;
+  final String? observerName;
+
+  /// The entry fix as of the Start tap, or `null`. A fix still being
+  /// acquired at that moment is dropped, not written later.
+  final GeoFix? entryFix;
+}
+
+typedef StartTransect = void Function(BuildContext context, TransectStart start);
+
+/// The real [StartTransect]: pushes Live, which inserts the session.
+void pushLiveTransect(BuildContext context, TransectStart start) {
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => LiveTransectScreen(
+        tapeLengthMeters: start.tapeLengthMeters,
+        siteName: start.siteName,
+        observerName: start.observerName,
+        entryFix: start.entryFix,
+      ),
+    ),
+  );
+}
+
 /// Sub-plan 6 (ui-ux-overhaul), step 5: restyle of sub-plan 5's
 /// `TransectSetupScreen` -- grouped `SectionCard`s, tape-length quick-pick
 /// chips, a non-blocking out-of-range hint, and site/observer prefilled from
-/// the most recent session. Still collects only what this project's data
-/// model uses: the physical tape length (density denominator, per
-/// `ReefSight_Specification.md`'s "Density, positioning, and sync") plus
-/// site/observer metadata -- v1's GPS start/end-point pickers stay dropped.
+/// the most recent session. Collects the physical tape length (density
+/// denominator, per `ReefSight_Specification.md`'s "Density, positioning,
+/// and sync") plus site/observer metadata, and -- sub-plan 12 -- the
+/// Spec's surface GPS fix at dive entry, taken here because the phone
+/// still has sky view. v1's live map and geofence stay dropped.
 class TransectSetupScreen extends StatefulWidget {
   const TransectSetupScreen({
     super.key,
@@ -26,6 +65,8 @@ class TransectSetupScreen extends StatefulWidget {
     this.storageInfo = const PlatformDeviceInfo(),
     this.batteryInfo = const BatteryPlusInfo(),
     this.thermalInfo = const PlatformDeviceInfo(),
+    this.locationProvider = const GeolocatorLocationProvider(),
+    this.startTransect = pushLiveTransect,
   });
 
   /// Injectable so widget tests can substitute an in-memory DB instead of
@@ -38,6 +79,14 @@ class TransectSetupScreen extends StatefulWidget {
   final BatteryInfo batteryInfo;
   final ThermalInfo thermalInfo;
 
+  /// Sub-plan 12: the entry fix. Injectable so widget tests can use a fake
+  /// -- the real one is `geolocator`'s platform channel.
+  final LocationProvider locationProvider;
+
+  /// What Start does. Injectable so widget tests can check what Setup hands
+  /// to Live without building Live's camera.
+  final StartTransect startTransect;
+
   @override
   State<TransectSetupScreen> createState() => _TransectSetupScreenState();
 }
@@ -47,11 +96,14 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
   final _siteController = TextEditingController();
   final _observerController = TextEditingController();
   late final DeviceHealthMonitor _deviceHealth;
+  late final GeoFixController _entryFix;
 
   @override
   void initState() {
     super.initState();
     _prefillFromLastSession();
+    // Sub-plan 12 step 3: acquisition starts when the screen opens, topside.
+    _entryFix = GeoFixController(widget.locationProvider)..acquire();
     // Battery level and free storage don't stream, so re-read them while
     // the diver sits on this screen (e.g. after plugging in).
     _deviceHealth = DeviceHealthMonitor(
@@ -108,6 +160,7 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
   @override
   void dispose() {
     _deviceHealth.dispose();
+    _entryFix.dispose();
     _tapeLengthController.dispose();
     _siteController.dispose();
     _observerController.dispose();
@@ -116,16 +169,16 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
 
   void _startTransect() {
     if (!_isValid) return;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LiveTransectScreen(
-          tapeLengthMeters: _parsedTapeLength!,
-          siteName:
-              _siteController.text.trim().isEmpty ? null : _siteController.text.trim(),
-          observerName: _observerController.text.trim().isEmpty
-              ? null
-              : _observerController.text.trim(),
-        ),
+    widget.startTransect(
+      context,
+      TransectStart(
+        tapeLengthMeters: _parsedTapeLength!,
+        siteName:
+            _siteController.text.trim().isEmpty ? null : _siteController.text.trim(),
+        observerName: _observerController.text.trim().isEmpty
+            ? null
+            : _observerController.text.trim(),
+        entryFix: _entryFix.value.fix,
       ),
     );
   }
@@ -201,9 +254,21 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
               ),
             ),
             const SizedBox(height: 16),
+            SectionCard(
+              icon: Icons.location_on_outlined,
+              title: 'Entry position',
+              child: GeoFixPanel(controller: _entryFix),
+            ),
+            const SizedBox(height: 16),
             ValueListenableBuilder<DeviceHealth?>(
               valueListenable: _deviceHealth.health,
-              builder: (context, health, _) => ReadyToDiveCard(health: health),
+              builder: (context, health, _) => ValueListenableBuilder<GeoFixState>(
+                valueListenable: _entryFix,
+                builder: (context, entry, _) => ReadyToDiveCard(
+                  health: health,
+                  entryPosition: entryPositionCheck(entry),
+                ),
+              ),
             ),
             const SizedBox(height: 16),
             const SectionCard(
