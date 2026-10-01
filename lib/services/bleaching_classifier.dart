@@ -9,30 +9,39 @@ import 'crop_geometry.dart';
 
 /// Crop + resize job handed to [compute] so the CPU-bound decode/crop/resize
 /// pass runs on a background isolate instead of blocking the UI isolate that
-/// `onStreamingData` callbacks (and overlay rebuilds) run on.
-typedef _CropJob = ({
+/// `onStreamingData` callbacks (and overlay rebuilds) run on. One job covers
+/// every region of a frame, so the full camera frame is decoded once per
+/// batch rather than once per colony (sub-plan 09, step 3).
+typedef _BatchCropJob = ({
   Uint8List frameBytes,
-  int left,
-  int top,
-  int width,
-  int height,
+  List<({int left, int top, int width, int height})> regions,
 });
 
 /// Must stay a top-level (or static) function with no captured state —
-/// [compute] runs it on a separate isolate.
-Uint8List _cropAndResizeToJpeg(_CropJob job) {
+/// [compute] runs it on a separate isolate. Returns one 224x224 JPEG per
+/// region, or an empty list if the frame can't be decoded.
+List<Uint8List> _cropAndResizeAllToJpeg(_BatchCropJob job) {
   final frame = img.decodeImage(job.frameBytes);
-  if (frame == null) return Uint8List(0);
+  if (frame == null) return const [];
 
-  final cropped = img.copyCrop(
-    frame,
-    x: job.left,
-    y: job.top,
-    width: job.width,
-    height: job.height,
-  );
-  final resized = img.copyResize(cropped, width: 224, height: 224);
-  return Uint8List.fromList(img.encodeJpg(resized));
+  return [
+    for (final region in job.regions)
+      Uint8List.fromList(
+        img.encodeJpg(
+          img.copyResize(
+            img.copyCrop(
+              frame,
+              x: region.left,
+              y: region.top,
+              width: region.width,
+              height: region.height,
+            ),
+            width: 224,
+            height: 224,
+          ),
+        ),
+      ),
+  ];
 }
 
 /// Health label + confidence for one classified colony crop.
@@ -49,8 +58,8 @@ class ColonyHealth {
 ///
 /// Per Spec Phase C "Per-colony decisions": the crop comes directly from the
 /// segmentation model's own box, so there is no separate matching step —
-/// [classifyCrop] takes the frame the box was detected in and the box
-/// itself, nothing else.
+/// [classifyBatch] takes the frame the boxes were detected in and the boxes
+/// themselves, nothing else.
 class BleachingClassifier {
   BleachingClassifier({required String modelAssetPath})
     : _yolo = YOLO(
@@ -62,7 +71,7 @@ class BleachingClassifier {
   final YOLO _yolo;
   bool _isReady = false;
 
-  // Tracks the in-flight classifyCrop call (if any) so dispose() can wait
+  // Tracks the in-flight classifyBatch call (if any) so dispose() can wait
   // for it instead of tearing down the native instance mid-inference.
   Future<void>? _pendingCall;
 
@@ -78,21 +87,24 @@ class BleachingClassifier {
     }
   }
 
-  /// Crops [frameJpegBytes] to [boxPixels], resizes to the classifier's
-  /// 224x224 training resolution, and classifies the crop. Returns null if
-  /// the classifier isn't loaded yet, the frame can't be decoded, the native
-  /// side returns no classification for this crop, or inference fails.
-  Future<ColonyHealth?> classifyCrop(
+  /// Crops [frameJpegBytes] to each of [boxesPixels], resizes each crop to
+  /// the classifier's 224x224 training resolution, and classifies them in
+  /// turn. Returns one result per box, `null` where the classifier isn't
+  /// loaded yet, the frame can't be decoded, the native side returns no
+  /// classification for that crop, or inference fails. Never throws.
+  Future<List<ColonyHealth?>> classifyBatch(
     Uint8List frameJpegBytes,
-    Rect boxPixels, {
+    List<Rect> boxesPixels, {
     required int frameWidth,
     required int frameHeight,
   }) {
-    if (!_isReady) return Future.value(null);
+    if (!_isReady || boxesPixels.isEmpty) {
+      return Future.value(List.filled(boxesPixels.length, null));
+    }
 
-    final future = _classifyCrop(
+    final future = _classifyBatch(
       frameJpegBytes,
-      boxPixels,
+      boxesPixels,
       frameWidth: frameWidth,
       frameHeight: frameHeight,
     );
@@ -100,31 +112,52 @@ class BleachingClassifier {
     return future;
   }
 
-  Future<ColonyHealth?> _classifyCrop(
+  Future<List<ColonyHealth?>> _classifyBatch(
     Uint8List frameJpegBytes,
-    Rect boxPixels, {
+    List<Rect> boxesPixels, {
     required int frameWidth,
     required int frameHeight,
   }) async {
-    try {
-      final region = computeCropRegion(
-        boxPixels,
-        frameWidth: frameWidth,
-        frameHeight: frameHeight,
-      );
+    final results = List<ColonyHealth?>.filled(boxesPixels.length, null);
 
+    List<Uint8List> crops;
+    try {
       // Decode/crop/resize/encode is CPU-bound work on a full camera frame —
       // runs on a background isolate so it never blocks the UI isolate that
       // onStreamingData callbacks and overlay rebuilds run on.
-      final jpegBytes = await compute(_cropAndResizeToJpeg, (
+      crops = await compute(_cropAndResizeAllToJpeg, (
         frameBytes: frameJpegBytes,
-        left: region.left,
-        top: region.top,
-        width: region.width,
-        height: region.height,
+        regions: [
+          for (final box in boxesPixels)
+            _region(box, frameWidth: frameWidth, frameHeight: frameHeight),
+        ],
       ));
-      if (jpegBytes.isEmpty) return null;
+    } catch (e) {
+      debugPrint('BleachingClassifier: crop batch failed: $e');
+      return results;
+    }
 
+    for (var i = 0; i < crops.length && i < results.length; i++) {
+      results[i] = await _predict(crops[i]);
+    }
+    return results;
+  }
+
+  static ({int left, int top, int width, int height}) _region(
+    Rect box, {
+    required int frameWidth,
+    required int frameHeight,
+  }) {
+    final r = computeCropRegion(
+      box,
+      frameWidth: frameWidth,
+      frameHeight: frameHeight,
+    );
+    return (left: r.left, top: r.top, width: r.width, height: r.height);
+  }
+
+  Future<ColonyHealth?> _predict(Uint8List jpegBytes) async {
+    try {
       final result = await _yolo.predict(jpegBytes);
       final detections = (result['detections'] as List?)
           ?.whereType<Map>()
@@ -135,7 +168,7 @@ class BleachingClassifier {
       final top = detections.first;
       return ColonyHealth(label: top.className, confidence: top.confidence);
     } catch (e) {
-      debugPrint('BleachingClassifier: classifyCrop failed: $e');
+      debugPrint('BleachingClassifier: predict failed for one crop: $e');
       return null;
     }
   }

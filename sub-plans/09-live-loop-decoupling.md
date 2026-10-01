@@ -83,4 +83,61 @@ than ~2× the nominal interval, apart from real stalls in the native stream.
   its real `trackBuffer` conversion factor.
 
 ## Measurements
-_(fill in: before / after — events/s, updates/s, gap p50/p95, classifications/s)_
+
+### Simulated (2026-10-01)
+`test/services/live_frame_processor_test.dart`, group "simulated 8 Hz stream": a perfect 8 Hz event
+stream for 10 s, 3 colonies in frame drifting slowly, fake classifier at 60 ms per crop, run
+through the same `LiveFrameProcessor` the app uses, in legacy and decoupled mode. It isolates what
+the *loop* does to the update rate. The native stream has no stalls here, so this is a lower bound
+on the real-world gaps.
+
+| Loop | events/s | tracker updates/s | gap p50 / p95 / max | classifications/s | mean batch |
+|---|---|---|---|---|---|
+| Before (legacy) | 8.0 | **4.0** | 250 / 250 / 250 ms | 12.0 | 58 ms (1 crop) |
+| After (decoupled) | 8.0 | **8.0** | 125 / 125 / 125 ms | 3.0 | 175 ms (≤3 crops) |
+
+With 3 colonies, the legacy loop spends 180 ms classifying each processed frame, so every other
+event is dropped and the tracker runs at half the stream rate. It also reclassifies every colony
+on every processed frame: 12 crops/s, 4× the decoupled loop's 3/s (≈1 per colony per second). The
+gap grows with colony count (N × crop latency), so a busier reef would be worse.
+
+### On-device (pending)
+Run Live with Settings → Diagnostics → "Show diagnostics on Live" on, once with "Legacy live loop
+(baseline)" on and once off, pointed at the same scene. Read the loop line on the overlay, or the
+`ReefSight: live loop (legacy|decoupled): …` debug log (every 5 s in debug builds). Record both
+here, then delete the legacy path (`LiveFrameProcessor._handleLegacy`,
+`AppSettings.legacyLiveLoop`, and its Settings switch).
+
+| Loop | events/s | tracker updates/s | gap p50 / p95 / max | classifications/s | mean batch |
+|---|---|---|---|---|---|
+| Before (legacy) | | | | | |
+| After (decoupled) | | | | | |
+
+Sub-plan 08 should use the on-device **after** updates/s as its `trackBuffer` frames→seconds factor.
+
+## Implementation notes (2026-10-01)
+- `lib/services/live_frame_processor.dart`: the per-event logic, pulled out of the screen so it is
+  testable without the native view. `lib/services/classification_scheduler.dart`: step 3.
+  `lib/services/live_loop_metrics.dart`: steps 1/4.
+- **Decided: late results are kept.** A classification result for a track that was lost or removed
+  while its batch ran is still recorded under that track id, because finalize persists every track
+  ever seen and the sample is real evidence about that colony. Results are dropped only after the
+  session is finalized (screen) or the processor is closed (dispose). This differs from step 3's
+  "drop results for tracks that have since been removed".
+- **Empty-frame aging test:** it already existed at tracker level
+  (`test/tracking/bot_sort_tracker_test.dart`, "a track is removed after being missed for
+  track_buffer frames"). The new test proves the *loop* now feeds empty frames to the tracker
+  (`live_frame_processor_test.dart`, "an event with no detections still advances the tracker"). No
+  Python parity fixture was added for empty-frame sequences. That would need a notebook run, and
+  the tracker code is unchanged.
+- Fixed along the way: `_finalizeSession` iterated `_firstSeenAt.keys` across awaits while
+  streaming events could still add ids. It now closes the frame processor first (freezing the loop)
+  and iterates a snapshot.
+- The legacy/decoupled choice is read once when Live opens and is fixed for that transect.
+  Switching mid-session could let a stale legacy update rewind the tracker. So toggle it in
+  Settings *between* the two measurement transects.
+- Review follow-ups not done (low impact, noted for later): the scheduler and metrics use the wall
+  clock (`DateTime.now`), so a backward clock step stalls scheduling until it catches up. A
+  monotonic `Stopwatch` clock would fix it. `_lastAttemptAt` is never pruned, at one entry per
+  track id, so it's tiny. One failing crop inside the isolate loses the whole batch (all nulls,
+  retried 1 s later).

@@ -16,4 +16,11 @@ class AppSettings {
   /// Kept, not removed, because it's useful for field debugging and thesis
   /// screenshots.
   final showDiagnostics = ValueNotifier<bool>(false);
+
+  /// Sub-plan 09 (live-loop decoupling) measurement baseline: runs Live with
+  /// the pre-sub-plan-09 loop (frames dropped while classifying, empty
+  /// frames skipped) so one device session can record before *and* after
+  /// numbers. Off by default; remove with the legacy path once the numbers
+  /// are recorded in `mobile/sub-plans/09-live-loop-decoupling.md`.
+  final legacyLiveLoop = ValueNotifier<bool>(false);
 }

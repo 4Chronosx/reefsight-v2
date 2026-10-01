@@ -123,6 +123,26 @@ void main() {
     expect(find.textContaining('#$trackId: CORAL_BL (456px²)'), findsOneWidget);
   });
 
+  testWidgets('DiagnosticsOverlay shows the live-loop line only when given',
+      (tester) async {
+    Widget overlay({String? loopSummary}) => _wrapLandscape(
+      tester,
+      DiagnosticsOverlay(
+        segProcessingMs: 12.3,
+        tracks: const [],
+        healthAggregator: HealthAggregator(),
+        sizesPx: const {},
+        loopSummary: loopSummary,
+      ),
+    );
+
+    await tester.pumpWidget(overlay());
+    expect(find.textContaining('upd/s'), findsNothing);
+
+    await tester.pumpWidget(overlay(loopSummary: 'ev/s 8.0  upd/s 8.0'));
+    expect(find.text('ev/s 8.0  upd/s 8.0'), findsOneWidget);
+  });
+
   testWidgets(
       'end-transect sheet resolves true only after "End transect" is tapped, '
       'not merely by opening it', (tester) async {

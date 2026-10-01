@@ -18,9 +18,14 @@ class DiagnosticsOverlay extends StatelessWidget {
     required this.tracks,
     required this.healthAggregator,
     required this.sizesPx,
+    this.loopSummary,
   });
 
   final double? segProcessingMs;
+
+  /// `LiveLoopSummary.format()` (sub-plan 09): events/s, tracker updates/s,
+  /// update gaps, classifications/s. `null` until the first event.
+  final String? loopSummary;
   final List<STrack> tracks;
   final HealthAggregator healthAggregator;
   final Map<int, double> sizesPx;
@@ -42,6 +47,11 @@ class DiagnosticsOverlay extends StatelessWidget {
             'tracks: ${tracks.length}',
             style: const TextStyle(color: Colors.white70, fontSize: 12),
           ),
+          if (loopSummary != null)
+            Text(
+              loopSummary!,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
           for (final track in tracks)
             Text(
               '#${track.trackId}: '

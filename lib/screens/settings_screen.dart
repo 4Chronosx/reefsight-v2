@@ -45,19 +45,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SectionCard(
             icon: Icons.bug_report_outlined,
             title: 'Diagnostics',
-            child: ValueListenableBuilder<bool>(
-              valueListenable: AppSettings.instance.showDiagnostics,
-              builder: (context, showDiagnostics, _) => SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Show diagnostics on Live'),
-                subtitle: const Text(
-                  'Per-track debug overlay (segmentation time, track IDs) '
-                  'for field debugging.',
+            child: Column(
+              children: [
+                ValueListenableBuilder<bool>(
+                  valueListenable: AppSettings.instance.showDiagnostics,
+                  builder: (context, showDiagnostics, _) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Show diagnostics on Live'),
+                    subtitle: const Text(
+                      'Per-track debug overlay (segmentation time, track IDs, '
+                      'tracker update rate) for field debugging.',
+                    ),
+                    value: showDiagnostics,
+                    onChanged: (value) =>
+                        AppSettings.instance.showDiagnostics.value = value,
+                  ),
                 ),
-                value: showDiagnostics,
-                onChanged: (value) =>
-                    AppSettings.instance.showDiagnostics.value = value,
-              ),
+                ValueListenableBuilder<bool>(
+                  valueListenable: AppSettings.instance.legacyLiveLoop,
+                  builder: (context, legacyLiveLoop, _) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Legacy live loop (baseline)'),
+                    subtitle: const Text(
+                      'Measurement only: the old loop that skips frames '
+                      'while classifying. Applies from the next transect. '
+                      'Leave off for real surveys.',
+                    ),
+                    value: legacyLiveLoop,
+                    onChanged: (value) =>
+                        AppSettings.instance.legacyLiveLoop.value = value,
+                  ),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 16),

@@ -11,6 +11,8 @@ import '../services/bleaching_classifier.dart';
 import '../services/colony_size.dart';
 import '../services/health_aggregator.dart';
 import '../services/health_history_recorder.dart';
+import '../services/live_frame_processor.dart';
+import '../services/live_loop_metrics.dart';
 import '../services/mask_storage.dart';
 import '../services/model_assets.dart';
 import '../services/tracked_colony_record.dart';
@@ -19,7 +21,6 @@ import '../services/transect_recorder.dart';
 import '../services/transect_session.dart';
 import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
-import '../tracking/tracker_detection.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/live/diagnostics_overlay.dart';
 import '../widgets/live/end_transect_sheet.dart';
@@ -33,15 +34,16 @@ import 'summary_screen.dart';
 /// Live segmentation + crop-classify + tracking screen (sub-plan 3:
 /// `mobile/sub-plans/03-crop-classify-and-tracking.md`).
 ///
-/// Per frame: every segmentation box is classified (no longer just the top
-/// one -- that simplification was sub-plan 1's, before a tracker existed to
-/// give each detection a stable identity), then all of this frame's
-/// detections -- each carrying its own mask + health as an opaque payload --
-/// feed [BoTSortTracker.update]. There is no separate matching/alignment
-/// step: a detection's payload is exactly the mask/health that came from the
-/// same segmentation box the tracker is matching by geometry, so whichever
-/// output [STrack] a detection matches, its payload comes along for free
-/// (see `tracking/strack.dart`'s `payload` field).
+/// Per streaming event ([LiveFrameProcessor], sub-plan 09): every frame's
+/// detections -- each carrying its own mask + box as an opaque payload --
+/// feed [BoTSortTracker.update] straight away, empty frames included. There
+/// is no separate matching/alignment step: a detection's payload is exactly
+/// the mask/box that came from the same segmentation box the tracker is
+/// matching by geometry, so whichever output [STrack] a detection matches,
+/// its payload comes along for free (see `tracking/strack.dart`'s `payload`
+/// field). Health is classified afterwards, off the tracker's path, by track
+/// id: confirmed tracks are cropped from their box in that frame and
+/// classified about once a second each (`ClassificationScheduler`).
 ///
 /// Recording (sub-plan 3 step 1) runs through [TransectRecorder], wired to
 /// the forked `ultralytics_yolo` plugin's native recorder
@@ -71,13 +73,6 @@ class LiveTransectScreen extends StatefulWidget {
 
 /// One frame's mask + health for a single detection, carried opaquely
 /// through the tracker via [TrackerDetection.payload] / [STrack.payload].
-class _DetectionPayload {
-  const _DetectionPayload({this.mask, this.health});
-
-  final List<List<double>>? mask;
-  final ColonyHealth? health;
-}
-
 class _LiveTransectScreenState extends State<LiveTransectScreen> {
   final _classifier = BleachingClassifier(
     modelAssetPath: ModelAssets.nmfsOsiBleachingClassifier,
@@ -126,15 +121,14 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
   bool _endingTransect = false;
   String? _endTransectError;
 
-  // Compute-budget guard (Spec Open Item #1): never let a new frame's
-  // classify+track round start while the previous one is still running.
-  // Classifying every detection in a frame (not just the top one, now that
-  // there's a tracker to give each a stable identity) means this round's
-  // duration scales with detection count per frame -- acceptable for the
-  // sparse, non-overlapping colonies this project targets, but flagged here
-  // since it hasn't been stress-tested with many colonies in frame at once
-  // (Spec's "Open risk").
-  bool _isProcessing = false;
+  // Sub-plan 09: per-event tracking + scheduled classification, and the
+  // loop timing it's measured by. The compute budget (Spec Open Item #1) is
+  // now bounded by the scheduler -- at most `maxPerFrame` crops per batch,
+  // one batch in flight -- instead of by dropping whole frames.
+  final _loopMetrics = LiveLoopMetrics();
+  late final LiveFrameProcessor _frameProcessor;
+  LiveLoopSummary? _loopSummary;
+  DateTime? _lastLoopLogAt;
 
   double? _segProcessingMs;
   List<STrack> _latestTracks = const [];
@@ -159,6 +153,15 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     _classifier.load().catchError((Object error) {
       debugPrint('ReefSight: classifier failed to load: $error');
     });
+    _frameProcessor = LiveFrameProcessor(
+      tracker: _tracker,
+      classify: _classifier.classifyBatch,
+      onTracks: _handleTracks,
+      onHealth: _handleHealth,
+      metrics: _loopMetrics,
+      // Read once: the loop is fixed for this Live session.
+      useLegacyLoop: AppSettings.instance.legacyLiveLoop.value,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sessionStartFuture = _startSession();
     });
@@ -264,7 +267,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       },
     );
 
-    _classifier.dispose().catchError((Object error) {
+    // Close the processor first: it stops accepting events and waits out any
+    // in-flight classification batch, so the classifier isn't torn down
+    // mid-predict.
+    // `close()` never throws, and `whenComplete` disposes regardless.
+    _frameProcessor.close().whenComplete(_classifier.dispose).catchError((
+      Object error,
+    ) {
       debugPrint('ReefSight: failed to dispose classifier: $error');
     });
     _yoloController.dispose();
@@ -279,13 +288,22 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     if (_finalized) return;
     _finalized = true;
 
+    // Freeze the live loop first, so no new track ids, masks or sizes land
+    // while the loop below awaits mask writes and upserts. Idempotent with
+    // dispose()'s own close().
+    await _frameProcessor.close();
+
     final db = _db;
     final sessionId = _sessionId;
     if (db == null || sessionId == null) return;
 
     try {
       final documentsDir = await getApplicationDocumentsDirectory();
-      for (final trackId in _firstSeenAt.keys) {
+      // A snapshot: streaming events keep arriving while this loop awaits
+      // mask writes and DB upserts, and a new track id landing in
+      // `_firstSeenAt` mid-iteration would throw a concurrent-modification
+      // error and abort the finalize.
+      for (final trackId in _firstSeenAt.keys.toList()) {
         final mask = _latestMasks[trackId];
         final maskPath = mask == null
             ? null
@@ -380,102 +398,77 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     }
   }
 
-  void _handleStreamingData(Map<String, dynamic> event) async {
+  void _handleStreamingData(Map<String, dynamic> event) {
     final segProcessingMs = (event['processingTimeMs'] as num?)?.toDouble();
-    if (segProcessingMs != null && mounted) {
-      setState(() => _segProcessingMs = segProcessingMs);
-    }
+    if (segProcessingMs != null) _segProcessingMs = segProcessingMs;
 
-    if (_isProcessing) return;
+    // Synchronous: the tracker has seen this event by the time this returns
+    // (sub-plan 09). `_handleTracks` below does the setState.
+    _frameProcessor.handleEvent(event);
+    _logLoopSummary();
+  }
 
-    final detectionsRaw = event['detections'] as List<dynamic>?;
-    final frameBytes = event['originalImage'] as Uint8List?;
-    final frameWidth = event['imageWidth'] as int?;
-    final frameHeight = event['imageHeight'] as int?;
-    if (detectionsRaw == null ||
-        detectionsRaw.isEmpty ||
-        frameBytes == null ||
-        frameWidth == null ||
-        frameHeight == null) {
+  /// Sub-plan 09 steps 1/4: while diagnostics are on, refresh the overlay's
+  /// loop line, and in debug builds log it every 5 s for the before/after
+  /// record. The overlay picks the new line up on `_handleTracks`' setState.
+  void _logLoopSummary() {
+    if (!AppSettings.instance.showDiagnostics.value) return;
+    final summary = _loopMetrics.summary();
+    _loopSummary = summary;
+
+    final now = DateTime.now();
+    final last = _lastLoopLogAt;
+    if (!kDebugMode ||
+        (last != null && now.difference(last) < const Duration(seconds: 5))) {
       return;
     }
+    _lastLoopLogAt = now;
+    final loop = _frameProcessor.useLegacyLoop ? 'legacy' : 'decoupled';
+    debugPrint('ReefSight: live loop ($loop): ${summary.format()}');
+  }
 
-    // TrackerDetection requires a strictly positive width/height (its own
-    // doc comment: a degenerate box reaches KalmanFilter.initiate() as zero
-    // variance and divides by zero in linalg.invert() instead of failing
-    // loudly) -- filtered here rather than trusted from the raw model
-    // output, since crop_geometry.dart's own floor/ceil clamping (used for
-    // the classify crop) doesn't apply to this raw float box.
-    final detections = detectionsRaw
-        .whereType<Map>()
-        .map(YOLOResult.fromMap)
-        .where((r) => r.boundingBox.width > 0 && r.boundingBox.height > 0)
-        .toList(growable: false);
-    if (detections.isEmpty) return;
+  /// Called by [LiveFrameProcessor] after every tracker update.
+  ///
+  /// Size/mask bookkeeping happens inside the same setState block as the
+  /// rebuild trigger so it stays atomic with what's displayed -- splitting
+  /// them (mutate, then separately setState) would let a future early-return
+  /// between the two show stale data.
+  void _handleTracks(List<STrack> tracks) {
+    if (!mounted) return;
+    final now = DateTime.now().toUtc();
+    setState(() {
+      _latestTracks = tracks;
+      for (final track in tracks) {
+        _firstSeenAt.putIfAbsent(track.trackId, () => now);
+        _lastSeenAt[track.trackId] = now;
 
-    _isProcessing = true;
-    try {
-      final trackerDetections = <TrackerDetection>[];
-      for (final result in detections) {
-        ColonyHealth? health;
-        try {
-          health = await _classifier.classifyCrop(
-            frameBytes,
-            result.boundingBox,
-            frameWidth: frameWidth,
-            frameHeight: frameHeight,
+        final payload = track.payload;
+        if (payload is! LiveDetectionPayload) continue;
+
+        final mask = payload.mask;
+        if (mask != null) {
+          _latestMasks[track.trackId] = mask;
+          final box = track.tlwh;
+          _latestSizePx[track.trackId] = maskAreaPixels(
+            mask,
+            boxWidthPx: box[2],
+            boxHeightPx: box[3],
           );
-        } catch (error) {
-          debugPrint('ReefSight: classifyCrop failed for one detection: $error');
         }
-        trackerDetections.add(
-          TrackerDetection(
-            x1: result.boundingBox.left,
-            y1: result.boundingBox.top,
-            x2: result.boundingBox.right,
-            y2: result.boundingBox.bottom,
-            score: result.confidence,
-            payload: _DetectionPayload(mask: result.mask, health: health),
-          ),
-        );
       }
+    });
+  }
 
-      final tracks = _tracker.update(trackerDetections);
-
-      // Aggregator/size mutations happen inside the same setState block as
-      // the rebuild trigger so they stay atomic with what's displayed --
-      // splitting them (mutate, then separately setState) would let a
-      // future early-return between the two show stale data.
-      if (mounted) {
-        final now = DateTime.now().toUtc();
-        setState(() {
-          _latestTracks = tracks;
-          for (final track in tracks) {
-            _firstSeenAt.putIfAbsent(track.trackId, () => now);
-            _lastSeenAt[track.trackId] = now;
-
-            final payload = track.payload;
-            if (payload is! _DetectionPayload) continue;
-
-            _healthAggregator.record(track.trackId, payload.health);
-            _healthHistoryRecorder.record(track.trackId, payload.health, now);
-
-            final mask = payload.mask;
-            if (mask != null) {
-              _latestMasks[track.trackId] = mask;
-              final box = track.tlwh;
-              _latestSizePx[track.trackId] = maskAreaPixels(
-                mask,
-                boxWidthPx: box[2],
-                boxHeightPx: box[3],
-              );
-            }
-          }
-        });
-      }
-    } finally {
-      _isProcessing = false;
-    }
+  /// Called by [LiveFrameProcessor]'s scheduler with each classification
+  /// result, keyed by the track it was sampled from. Results are kept even
+  /// if that track has since been lost or removed -- finalize persists every
+  /// track ever seen -- and dropped only once the session is finalized.
+  void _handleHealth(int trackId, ColonyHealth health, DateTime sampledAt) {
+    if (_finalized || !mounted) return;
+    setState(() {
+      _healthAggregator.record(trackId, health);
+      _healthHistoryRecorder.record(trackId, health, sampledAt.toUtc());
+    });
   }
 
   /// Opens the confirm sheet (sub-plan step 6 + decision: "Tapping it opens
@@ -643,6 +636,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
                   child: SafeArea(
                     child: DiagnosticsOverlay(
                       segProcessingMs: _segProcessingMs,
+                      loopSummary: _loopSummary?.format(),
                       tracks: _latestTracks,
                       healthAggregator: _healthAggregator,
                       sizesPx: _latestSizePx,
