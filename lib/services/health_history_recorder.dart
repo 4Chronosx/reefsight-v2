@@ -1,6 +1,7 @@
 import 'bleaching_classifier.dart';
+import 'classification_policy.dart';
 
-/// One frame's health classification, timestamped -- the raw sample
+/// One health classification, timestamped -- the raw sample
 /// `HealthAggregator` (sub-plan 3) folds into a running weighted sum instead
 /// of retaining.
 class HealthHistorySample {
@@ -8,11 +9,16 @@ class HealthHistorySample {
     required this.label,
     required this.confidence,
     required this.at,
+    this.uncertain = false,
   });
 
   final String label;
   final double confidence;
   final DateTime at;
+
+  /// Below the classifier confidence floor (sub-plan 10, step 3): kept as
+  /// part of the raw record, but `HealthAggregator` didn't count it.
+  final bool uncertain;
 }
 
 /// Per-track log of raw [HealthHistorySample]s, fed by the same
@@ -25,11 +31,20 @@ class HealthHistorySample {
 /// (`ReefSight_Specification.md`, "Storage") needs the actual sequence,
 /// which `HealthAggregator` structurally cannot reconstruct after the fact
 /// -- hence this separate recorder.
+///
+/// Unlike the aggregator, every sample is kept, including ones below
+/// [confidenceFloor]; those are flagged [HealthHistorySample.uncertain].
 class HealthHistoryRecorder {
+  HealthHistoryRecorder({
+    this.confidenceFloor = ClassificationPolicy.classifyConfFloor,
+  });
+
+  final double confidenceFloor;
+
   final Map<int, List<HealthHistorySample>> _samples = {};
 
-  /// Appends one frame's classification for [trackId] at [at]. `null` (a
-  /// failed/skipped classification for this frame) is a no-op, matching
+  /// Appends one classification for [trackId] at [at]. `null` (a
+  /// failed/skipped classification) is a no-op, matching
   /// [HealthAggregator.record]'s handling of the same case.
   void record(int trackId, ColonyHealth? health, DateTime at) {
     if (health == null) return;
@@ -38,6 +53,7 @@ class HealthHistoryRecorder {
         label: health.label,
         confidence: health.confidence,
         at: at,
+        uncertain: health.confidence < confidenceFloor,
       ),
     );
   }

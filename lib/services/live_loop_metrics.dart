@@ -11,6 +11,7 @@ class LiveLoopSummary {
     required this.meanDetections,
     required this.classificationsPerSecond,
     required this.meanBatchMs,
+    this.insufficientViews = 0,
   });
 
   /// Streaming events received from the native segmentation view.
@@ -30,6 +31,10 @@ class LiveLoopSummary {
   final double classificationsPerSecond;
   final double? meanBatchMs;
 
+  /// Due samples skipped in the window because their crop wasn't usable
+  /// (sub-plan 10: no mask, or mask coverage below the floor).
+  final int insufficientViews;
+
   /// One line for the diagnostics overlay and the debug log.
   String format() {
     String gap(int? ms) => ms?.toString() ?? '--';
@@ -39,7 +44,8 @@ class LiveLoopSummary {
         'gap p50/p95/max ${gap(gapP50Ms)}/${gap(gapP95Ms)}/${gap(gapMaxMs)}ms  '
         'det ${num1(meanDetections)}  '
         'cls/s ${num1(classificationsPerSecond)}  '
-        'batch ${meanBatchMs?.toStringAsFixed(0) ?? '--'}ms';
+        'batch ${meanBatchMs?.toStringAsFixed(0) ?? '--'}ms  '
+        'skip $insufficientViews';
   }
 }
 
@@ -67,6 +73,13 @@ class LiveLoopMetrics {
   final _events = Queue<({DateTime at, int detections})>();
   final _updates = Queue<DateTime>();
   final _batches = Queue<({DateTime at, Duration elapsed, int n})>();
+  final _insufficientViews = Queue<DateTime>();
+
+  void recordInsufficientView() {
+    final now = _now();
+    _insufficientViews.add(now);
+    _prune(now);
+  }
 
   void recordEvent({required int detectionCount}) {
     final now = _now();
@@ -118,6 +131,7 @@ class LiveLoopMetrics {
           : _batches.fold<int>(0, (sum, b) => sum + b.elapsed.inMicroseconds) /
                 _batches.length /
                 1000,
+      insufficientViews: _insufficientViews.length,
     );
   }
 
@@ -131,6 +145,10 @@ class LiveLoopMetrics {
     }
     while (_batches.isNotEmpty && _batches.first.at.isBefore(cutoff)) {
       _batches.removeFirst();
+    }
+    while (_insufficientViews.isNotEmpty &&
+        _insufficientViews.first.isBefore(cutoff)) {
+      _insufficientViews.removeFirst();
     }
   }
 

@@ -76,6 +76,14 @@ class ClassificationScheduler {
 
   bool get isBusy => _inFlight != null;
 
+  /// Whether [trackId] would be eligible at [at]: never attempted, or last
+  /// attempted at least [reclassifyEvery] ago. Lets callers skip per-track
+  /// crop work for tracks that aren't due anyway.
+  bool isDue(int trackId, DateTime at) {
+    final last = _lastAttemptAt[trackId];
+    return last == null || at.difference(last) >= reclassifyEvery;
+  }
+
   /// The track ids [offer] would classify from [candidates] at [at], in
   /// priority order. Doesn't consider whether a batch is in flight.
   List<int> selectDue(List<ClassificationCandidate> candidates, DateTime at) {

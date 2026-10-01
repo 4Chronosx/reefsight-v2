@@ -75,6 +75,7 @@ class TrackedColonyRecord {
                     'label': sample.label,
                     'confidence': sample.confidence,
                     'at': sample.at.toIso8601String(),
+                    'uncertain': sample.uncertain,
                   })
               .toList(growable: false),
         ),
@@ -100,6 +101,8 @@ class TrackedColonyRecord {
               label: entry['label'] as String,
               confidence: (entry['confidence'] as num).toDouble(),
               at: DateTime.parse(entry['at'] as String),
+              // Added by sub-plan 10; rows written before it have no key.
+              uncertain: (entry['uncertain'] as bool?) ?? false,
             ),
           )
           .toList(growable: false),

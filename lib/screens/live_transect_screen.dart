@@ -159,8 +159,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
       onTracks: _handleTracks,
       onHealth: _handleHealth,
       metrics: _loopMetrics,
-      // Read once: the loop is fixed for this Live session.
+      // Read once: the loop and crop are fixed for this Live session.
       useLegacyLoop: AppSettings.instance.legacyLiveLoop.value,
+      cropStyle: AppSettings.instance.cropStyle.value,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sessionStartFuture = _startSession();
@@ -406,6 +407,47 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     // (sub-plan 09). `_handleTracks` below does the setState.
     _frameProcessor.handleEvent(event);
     _logLoopSummary();
+    _logMaskGeometry(event);
+  }
+
+  int _maskGeometryLogged = 0;
+
+  /// Sub-plan 10, step 0 (on-device, temporary): which coordinate space is
+  /// `YOLOResult.mask`'s grid in -- box-local, full-frame, or the model's
+  /// 640-letterboxed input? Comparing the grid's rows x cols against the box
+  /// and frame sizes for a few detections settles it; the value range says
+  /// whether the 0.5 threshold is right (0-1 vs 0-255). Every debug build
+  /// logs it -- not gated on diagnostics, so the first device run can't
+  /// miss it -- for the first 10 masked detections per session. Remove once
+  /// the answer is recorded in `colony_size.dart`. Until then crop spec v1
+  /// assumes box-local, 0-1 masks.
+  void _logMaskGeometry(Map<String, dynamic> event) {
+    if (!kDebugMode || _maskGeometryLogged >= 10) return;
+    final raw = event['detections'];
+    if (raw is! List) return;
+    for (final map in raw.whereType<Map>()) {
+      if (_maskGeometryLogged >= 10) return;
+      final result = YOLOResult.fromMap(map);
+      final mask = result.mask;
+      if (mask == null || mask.isEmpty) continue;
+      _maskGeometryLogged++;
+      final box = result.boundingBox;
+      var minValue = double.infinity, maxValue = double.negativeInfinity;
+      for (final row in mask) {
+        for (final v in row) {
+          if (v < minValue) minValue = v;
+          if (v > maxValue) maxValue = v;
+        }
+      }
+      debugPrint(
+        'ReefSight: mask geometry (sub-plan 10 step 0): '
+        'mask ${mask.length}x${mask.first.length} (rows x cols), '
+        'values ${minValue.toStringAsFixed(2)}..${maxValue.toStringAsFixed(2)}, '
+        'box ${box.width.toStringAsFixed(1)}x${box.height.toStringAsFixed(1)} '
+        'at (${box.left.toStringAsFixed(1)}, ${box.top.toStringAsFixed(1)}), '
+        'frame ${event['imageWidth']}x${event['imageHeight']}',
+      );
+    }
   }
 
   /// Sub-plan 09 steps 1/4: while diagnostics are on, refresh the overlay's
@@ -424,7 +466,8 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
     }
     _lastLoopLogAt = now;
     final loop = _frameProcessor.useLegacyLoop ? 'legacy' : 'decoupled';
-    debugPrint('ReefSight: live loop ($loop): ${summary.format()}');
+    final crop = _frameProcessor.cropStyle.name;
+    debugPrint('ReefSight: live loop ($loop, $crop): ${summary.format()}');
   }
 
   /// Called by [LiveFrameProcessor] after every tracker update.

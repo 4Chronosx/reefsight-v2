@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/app_database.dart';
 import '../services/app_settings.dart';
+import '../services/crop_geometry.dart';
 import '../services/model_assets.dart';
 import '../widgets/section_card.dart';
 
@@ -74,6 +75,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     value: legacyLiveLoop,
                     onChanged: (value) =>
                         AppSettings.instance.legacyLiveLoop.value = value,
+                  ),
+                ),
+                ValueListenableBuilder<CropStyle>(
+                  valueListenable: AppSettings.instance.cropStyle,
+                  builder: (context, cropStyle, _) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Classifier crop'),
+                    subtitle: const Text(
+                      'Comparison only. "Inside mask" is the spec default. '
+                      'Applies from the next transect.',
+                    ),
+                    trailing: DropdownButton<CropStyle>(
+                      value: cropStyle,
+                      onChanged: (value) {
+                        if (value != null) {
+                          AppSettings.instance.cropStyle.value = value;
+                        }
+                      },
+                      items: const [
+                        DropdownMenuItem(
+                          value: CropStyle.insideMaskSquare,
+                          child: Text('Inside mask'),
+                        ),
+                        DropdownMenuItem(
+                          value: CropStyle.boxStretch,
+                          child: Text('Box stretch'),
+                        ),
+                        DropdownMenuItem(
+                          value: CropStyle.boxSquarePad,
+                          child: Text('Box square'),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],

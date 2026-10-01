@@ -25,12 +25,16 @@ class TransectReport {
       .where((colony) => colony.healthLabel == HealthAggregator.bleachedLabel)
       .length;
 
-  /// Colonies whose final aggregated label was never set (see
-  /// `TrackedColonyRecord.healthLabel`'s doc comment) -- excluded from
-  /// [bleachingPrevalenceFraction]'s denominator, same as
-  /// `transect_metrics.dart`'s `bleachingPrevalence`.
-  int get unclassifiedCount =>
+  /// Colonies with no final label, shown as "Uncertain" (sub-plan 10):
+  /// never classified, or fewer than `minConfidentSamples` confident
+  /// samples. Excluded from [bleachingPrevalenceFraction]'s denominator,
+  /// same as `transect_metrics.dart`'s `bleachingPrevalence`.
+  int get uncertainCount =>
       colonies.where((colony) => colony.healthLabel == null).length;
+
+  /// Colonies with a confident label -- the denominator of
+  /// [bleachingPrevalenceFraction].
+  int get classifiedCount => totalColonies - uncertainCount;
 
   double? get bleachingPrevalenceFraction => bleachingPrevalence(colonies);
 

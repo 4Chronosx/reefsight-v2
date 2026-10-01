@@ -104,8 +104,10 @@ void main() {
     ]);
     final trackId = tracks.single.trackId;
 
-    final aggregator = HealthAggregator();
-    aggregator.record(trackId, const ColonyHealth(label: 'CORAL_BL', confidence: 0.8));
+    // Two confident samples: sub-plan 10's minimum before a label shows.
+    final aggregator = HealthAggregator()
+      ..record(trackId, const ColonyHealth(label: 'CORAL_BL', confidence: 0.8))
+      ..record(trackId, const ColonyHealth(label: 'CORAL_BL', confidence: 0.8));
 
     await tester.pumpWidget(
       _wrapLandscape(

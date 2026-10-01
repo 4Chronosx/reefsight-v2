@@ -5,6 +5,7 @@ import 'dart:ui' show Rect;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/bleaching_classifier.dart';
+import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/live_frame_processor.dart';
 import 'package:reefsight_mobile/services/live_loop_metrics.dart';
 import 'package:reefsight_mobile/tracking/bot_sort_tracker.dart';
@@ -66,6 +67,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
       );
@@ -90,6 +92,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
       );
@@ -107,6 +110,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
       );
@@ -129,6 +133,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: BoTSortTracker(),
         classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: updates.add,
         onHealth: (_, _, _) {},
       );
@@ -164,6 +169,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) => updates++,
         onHealth: (_, _, _) {},
         metrics: metrics,
@@ -182,6 +188,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: BoTSortTracker(),
         classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
       );
@@ -208,6 +215,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (id, h, _) => health.add((id, h)),
       );
@@ -223,6 +231,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
       );
@@ -231,6 +240,177 @@ void main() {
       processor.handleEvent(_event([_det(100, 100)]));
 
       expect(tracker.tracks, isEmpty);
+    });
+  });
+
+  // Sub-plan 10 (classifier input and reject), steps 1-2. The tests above
+  // pin `boxStretch` because they're about the loop; these are about which
+  // crop is offered, and whether it's offered at all.
+  group('LiveFrameProcessor gating (sub-plan 10)', () {
+    List<List<double>> full(int rows, int cols) =>
+        List.generate(rows, (_) => List.filled(cols, 1.0));
+
+    Map<String, dynamic> detWithMask(
+      Rect box,
+      List<List<double>> mask, {
+      double score = 0.9,
+    }) => {
+      ..._det(box.left, box.top, score: score),
+      'boundingBox': {
+        'left': box.left,
+        'top': box.top,
+        'right': box.right,
+        'bottom': box.bottom,
+      },
+      'mask': mask,
+    };
+
+    test('insideMaskSquare is the default and offers the square window',
+        () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+      );
+
+      // A 200x100 box, fully masked: side = min(200, 100) = 100, centred on
+      // the deepest cell (row 2, col 4 of a 5x10 grid -> x 190, y 150).
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 200, 100), full(5, 10))]),
+      );
+      await pumpEventQueue();
+
+      expect(processor.cropStyle, CropStyle.insideMaskSquare);
+      expect(fake.calls.single, [const Rect.fromLTWH(140, 100, 100, 100)]);
+    });
+
+    test('a low-coverage crop is not offered, counts once per retry window, '
+        'and the track stays due', () async {
+      var clockMs = 0;
+      DateTime now() =>
+          DateTime.utc(2026, 10, 1).add(Duration(milliseconds: clockMs));
+      final fake = _FakeClassifier();
+      final metrics = LiveLoopMetrics(now: now);
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        metrics: metrics,
+        now: now,
+      );
+
+      // Only the middle row of the box is coral: the 100 px window is the
+      // box itself, and 20% of it is mask.
+      final thin = List.generate(5, (r) => List.filled(5, r == 2 ? 1.0 : 0.0));
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 100, 100), thin)]),
+      );
+      await pumpEventQueue();
+
+      expect(fake.calls, isEmpty);
+      expect(metrics.summary().insufficientViews, 1);
+
+      // 125 ms later, still a poor view: inside the 250 ms retry window, so
+      // it's neither re-cropped nor counted again.
+      clockMs = 125;
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 100, 100), thin)]),
+      );
+      await pumpEventQueue();
+      expect(metrics.summary().insufficientViews, 1);
+
+      // Same colony, now seen fully after the retry window: still due (an
+      // insufficient view isn't an attempt), so it's offered.
+      clockMs = 375;
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 100, 100), full(5, 5))]),
+      );
+      await pumpEventQueue();
+
+      expect(fake.calls, hasLength(1));
+    });
+
+    test('a detection without a mask is not offered under insideMaskSquare',
+        () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+
+      expect(fake.calls, isEmpty);
+    });
+
+    test('a detection below the segmentation floor is never offered',
+        () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        reclassifyEvery: Duration.zero,
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+      expect(fake.calls, hasLength(1));
+
+      // Same colony at 0.35: still tracked (BoT-SORT's low-score second
+      // pass), due again (reclassifyEvery 0), but below the 0.4 floor.
+      processor.handleEvent(_event([_det(101, 100, score: 0.35)]));
+      await pumpEventQueue();
+
+      expect(fake.calls, hasLength(1));
+    });
+
+    test('control: a second-pass match above the floor (0.5) is offered',
+        () async {
+      // Same setup as the 0.35 case, so that test can only pass because of
+      // the floor -- not because the low-score detection failed to match.
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        reclassifyEvery: Duration.zero,
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+      processor.handleEvent(_event([_det(101, 100, score: 0.5)]));
+      await pumpEventQueue();
+
+      expect(fake.calls, hasLength(2));
+    });
+
+    test('boxSquarePad offers a square around the box', () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        cropStyle: CropStyle.boxSquarePad,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+      );
+
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 200, 100), full(2, 2))]),
+      );
+      await pumpEventQueue();
+
+      expect(fake.calls.single, [const Rect.fromLTWH(100, 50, 200, 200)]);
     });
   });
 
@@ -243,6 +423,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: tracker,
         classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (id, _, _) => health.add(id),
         useLegacyLoop: true,
@@ -262,6 +443,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: BoTSortTracker(),
         classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) => updates++,
         onHealth: (_, _, _) {},
         useLegacyLoop: true,
@@ -303,6 +485,7 @@ void main() {
       final processor = LiveFrameProcessor(
         tracker: BoTSortTracker(),
         classify: slowClassify,
+        cropStyle: CropStyle.boxStretch,
         onTracks: (_) {},
         onHealth: (_, _, _) {},
         metrics: metrics,

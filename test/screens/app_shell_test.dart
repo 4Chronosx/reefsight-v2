@@ -49,7 +49,10 @@ void main() {
     await tester.tap(find.text('Settings'));
     await tester.pump();
 
-    final stackAfter = tester.widget<IndexedStack>(find.byType(IndexedStack));
+    // `.first`: Settings' crop-style DropdownButton (sub-plan 10) builds its
+    // own IndexedStack; the shell's is the outermost, so first in tree order.
+    final stackAfter =
+        tester.widget<IndexedStack>(find.byType(IndexedStack).first);
     expect(stackAfter.index, 2);
   });
 }

@@ -4,7 +4,9 @@ import '../constants/app_colors.dart';
 import '../services/health_aggregator.dart';
 
 /// A coloured pill for a colony's health label (`CORAL`, `CORAL_BL`, or
-/// unclassified), via `AppColors.forHealth` -- sub-plan 6 step 1.
+/// `null`), via `AppColors.forHealth` -- sub-plan 6 step 1. `null` reads
+/// "Uncertain" (sub-plan 10): never classified, or too few confident
+/// samples to call it.
 class HealthChip extends StatelessWidget {
   const HealthChip({super.key, required this.healthLabel});
 
@@ -17,7 +19,7 @@ class HealthChip extends StatelessWidget {
       case HealthAggregator.bleachedLabel:
         return 'Bleached';
       default:
-        return 'Unclassified';
+        return 'Uncertain';
     }
   }
 

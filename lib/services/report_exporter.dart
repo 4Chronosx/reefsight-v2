@@ -20,6 +20,9 @@ import 'transect_session.dart';
 class ReportExporter {
   const ReportExporter._();
 
+  /// The Health Label value for a colony with no confident label.
+  static const String uncertainLabel = 'UNCERTAIN';
+
   static const List<String> csvHeaders = [
     'Track ID',
     'Health Label',
@@ -31,7 +34,9 @@ class ReportExporter {
 
   static List<dynamic> _csvRow(TrackedColonyRecord colony) => [
         colony.trackId,
-        colony.healthLabel ?? '',
+        // Sub-plan 10: null is the "Uncertain" verdict, written explicitly
+        // so CSV readers can tell it apart from a missing value.
+        colony.healthLabel ?? uncertainLabel,
         colony.sizePx?.toStringAsFixed(1) ?? '',
         colony.firstSeenAt.toIso8601String(),
         colony.lastSeenAt.toIso8601String(),

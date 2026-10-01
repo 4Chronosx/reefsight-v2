@@ -267,18 +267,35 @@ class _ExecutiveTab extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 12),
+        // Sub-plan 10: prevalence below is over the classified colonies
+        // only, so show that denominator next to the total.
+        Text(
+          '${report.totalColonies} '
+          '${report.totalColonies == 1 ? 'colony' : 'colonies'} · '
+          '${report.classifiedCount} classified · '
+          '${report.uncertainCount} uncertain',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.onSurface.withValues(alpha: 0.7),
+            fontSize: 13,
+          ),
+        ),
+        const SizedBox(height: 16),
+        // Out of the classified colonies, matching the prevalence sentence
+        // below -- with many Uncertain colonies, dividing by the total would
+        // make the bars and the percentage disagree.
         HealthBar(
           label: 'Healthy',
           count: report.healthyCount,
-          total: report.totalColonies,
+          total: report.classifiedCount,
           color: AppColors.healthy,
         ),
         const SizedBox(height: 8),
         HealthBar(
           label: 'Bleached',
           count: report.bleachedCount,
-          total: report.totalColonies,
+          total: report.classifiedCount,
           color: AppColors.bleached,
         ),
         const SizedBox(height: 24),
@@ -331,7 +348,7 @@ class _ExecutiveTab extends StatelessWidget {
 
     add(report.healthyCount, AppColors.healthy);
     add(report.bleachedCount, AppColors.bleached);
-    add(report.unclassifiedCount, AppColors.unknown);
+    add(report.uncertainCount, AppColors.unknown);
     return sections;
   }
 }

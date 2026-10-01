@@ -45,7 +45,10 @@ void main() {
       expect(report.totalColonies, 4);
       expect(report.healthyCount, 2);
       expect(report.bleachedCount, 1);
-      expect(report.unclassifiedCount, 1);
+      // Sub-plan 10: a null label means "Uncertain" (never classified, or
+      // too few confident samples).
+      expect(report.uncertainCount, 1);
+      expect(report.classifiedCount, 3);
     });
 
     test('bleachingPrevalenceFraction delegates to transect_metrics, '

@@ -38,7 +38,11 @@ List<Uint8List> _cropAndResizeAllToJpeg(_BatchCropJob job) {
             ),
             width: 224,
             height: 224,
+            // Crop spec v1 step 6 (sub-plan 10): bilinear, JPEG q95 -- the
+            // same resampling ML sub-plan 2 harvests training crops with.
+            interpolation: img.Interpolation.linear,
           ),
+          quality: 95,
         ),
       ),
   ];

@@ -91,3 +91,77 @@ The scheduler (sub-plan 09) only classifies a track sample if:
 - The live app crops with `insideMaskSquare` by default, skips low-coverage and low-confidence
   samples, and shows uncertain colonies explicitly.
 - Tests pass. The crop spec in this file is the one ML sub-plan 2 implements in Python.
+
+## Status (2026-10-01)
+
+Steps 1–4 are implemented. All 216 tests pass and `flutter analyze` is clean. **Step 0 (on-device)
+is still open**, so the first "Done when" bullet isn't met yet.
+
+### Python parity for crop spec v1 (ML sub-plan 2 must match these)
+- **Mask threshold** is `>= 0.5`, assuming 0–1 values. Step 0's log prints the actual value range.
+- **Distance transform** is a two-pass 3-4 chamfer **in mask-grid cells**, not pixels. Cells
+  outside the grid count as background. On a non-square box the grid's cells aren't square in
+  pixels, and that's accepted for v1.
+- **Tie-break** goes to the maximum-distance cell nearest the foreground centroid in grid units. If
+  that's still tied, it's the first in row-major order.
+- **Anchor pixel** is the centre of the anchor cell's rect, under the box-local assumption.
+- **Side** is `round(min(box w, h))`, clamped to `[min(64, shorter frame edge), shorter frame
+  edge]`.
+- **Window left/top** is `round(anchor − side/2)`, then clamped to `[0, frame − side]`. Dart's
+  `round()` rounds half away from zero, while Python's `round()` rounds half to even. Use
+  `math.floor(x + 0.5)` for non-negative values in Python.
+- **Coverage** is computed exactly: the area of each foreground cell rect that overlaps the window,
+  divided by side².
+- **Resize** to 224×224 is bilinear (`img.Interpolation.linear`), and the JPEG is quality 95.
+
+### Where it lives
+- Crop spec v1: `lib/services/crop_geometry.dart`, in `CropStyle`, `deepestMaskCell` and
+  `computeClassifierCrop`.
+  - The anchor uses a two-pass 3-4 chamfer distance on the mask grid. Cells outside the grid count
+    as background.
+  - **Ties** (for example a uniform-thickness strip) go to the tied cell nearest the mask centroid.
+    Without that, the scan order would pick one end. The Python implementation in ML sub-plan 2
+    must apply the same tie-break.
+  - Window pixels are integers. `round()` is applied to the centred left/top, and the window is then
+    shifted into the frame. Coverage is computed exactly, as the area of each mask cell's rect that
+    overlaps the window.
+- Thresholds: `lib/services/classification_policy.dart` (`classifySegFloor` 0.4, `minCoverage` 0.6,
+  `classifyConfFloor` 0.7, `minConfidentSamples` 2).
+- Gating: `LiveFrameProcessor._candidates`.
+  - A candidate must be confirmed, have score ≥ 0.4, and be due. The crop is then cut.
+  - Insufficient view (no mask, or coverage < 0.6) isn't stamped as an attempt, so the track stays
+    due, but the same track isn't re-cropped for 250 ms (`insufficientViewRetry`). The overlay's
+    `skip N` therefore counts samples, not 8 Hz events. The count also depends on the scheduler
+    being free, since frames with a batch in flight aren't evaluated at all.
+- CSV export writes a `null` label as `UNCERTAIN`. The Summary's Healthy/Bleached bars divide by
+  classified colonies, matching the prevalence sentence.
+- Not done from review: persisting the crop style per session. It's a debug setting, and it's
+  logged in the debug "live loop" line. Also not done: gating score at 0.6 instead of 0.4. BoT-SORT
+  second-pass matches at 0.4–0.6 do get classified. Revisit with sub-plan 08's score histogram.
+  - The coverage gate applies only to `insideMaskSquare`. The box styles report coverage 1.0.
+- Uncertain:
+  - `HealthAggregator` ignores below-floor samples and returns `null` until it has 2 confident ones.
+  - `HealthHistoryRecorder` keeps every sample and flags low ones `uncertain`. The flag is written
+    to the `health_history` JSON. Rows written before this have no key and read as `false`.
+  - Summary shows "N colonies · M classified · K uncertain". `HealthChip` shows `null` as
+    "Uncertain".
+- Debug: Settings → Diagnostics → "Classifier crop" picks the style. It's read once per transect.
+
+### Step 0: how to run it
+In a debug build, turn on "Show diagnostics on Live" and start a transect with colonies in view.
+The log prints `ReefSight: mask geometry (sub-plan 10 step 0): mask R x C, box W x H at (x, y),
+frame FW x FH` for the first 10 masked detections. Read it as follows:
+- **R×C tracks the box's aspect and size** (it differs per detection): the grid is box-local. The
+  current code is right, and only the doc comments need updating.
+- **R×C is the same for every detection and matches the frame's aspect**: it's full-frame. Change
+  `_maskCellRect` in `crop_geometry.dart` and `maskAreaPixels` in `colony_size.dart` to index the
+  frame instead of the box.
+- **R×C is 160×160 or 640×640 regardless of the frame**: it's model-input (letterboxed). Map
+  through the letterbox in those same two places.
+
+Record the answer here and in `colony_size.dart`'s doc comment, then remove `_logMaskGeometry` from
+`live_transect_screen.dart`.
+
+### Cloud sync (sub-plan 07)
+07 isn't implemented yet. Its `colonies.health_history_json` will carry the new optional
+`uncertain` field as-is, since it's the same JSON text.

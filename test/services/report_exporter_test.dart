@@ -72,8 +72,11 @@ void main() {
       expect(rows[2][1], 'CORAL_BL');
     });
 
-    test('an unclassified colony (null health label) writes an empty '
-        'field, not a fabricated one', () async {
+    // Sub-plan 10: a null label is the app's verdict "Uncertain" (too few
+    // confident samples), not missing data -- so it's written explicitly,
+    // never as a fabricated CORAL/CORAL_BL.
+    test('an uncertain colony (null health label) writes UNCERTAIN, not a '
+        'fabricated label', () async {
       final path = await ReportExporter.exportCsv(
         outputDirectory: tempDir.path,
         session: session,
@@ -82,7 +85,7 @@ void main() {
 
       final rows = const CsvToListConverter()
           .convert(File(path).readAsStringSync());
-      expect(rows[1][1], '');
+      expect(rows[1][1], 'UNCERTAIN');
     });
 
     test('filename is scoped by site name and session start time', () async {

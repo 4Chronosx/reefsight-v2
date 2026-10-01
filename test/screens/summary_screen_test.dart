@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/app_shell.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
+import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -116,5 +117,44 @@ void main() {
 
     expect(find.text('Marigondon Reef'), findsOneWidget);
     expect(find.textContaining('75m transect'), findsOneWidget);
+  });
+
+  // Sub-plan 10, step 3: prevalence is computed over confidently classified
+  // colonies only, so the denominator is shown, not hidden.
+  testWidgets('shows "N colonies · M classified · K uncertain"',
+      (tester) async {
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    final sessionId = await db.insertSession(
+      TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+    );
+    final labels = ['CORAL', 'CORAL_BL', null, null];
+    for (var i = 0; i < labels.length; i++) {
+      await db.upsertColony(
+        TrackedColonyRecord(
+          sessionId: sessionId,
+          trackId: i + 1,
+          healthLabel: labels[i],
+          healthHistory: const [],
+          firstSeenAt: DateTime.utc(2026, 1, 1),
+          lastSeenAt: DateTime.utc(2026, 1, 1),
+        ),
+      );
+    }
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SummaryScreen(sessionId: sessionId, openDatabase: () async => db),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('4 colonies · 2 classified · 2 uncertain'),
+      findsOneWidget,
+    );
   });
 }

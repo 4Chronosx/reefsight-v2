@@ -68,6 +68,48 @@ void main() {
       expect(restored.healthHistory[1].confidence, 0.9);
     });
 
+    test('round-trips each sample\'s uncertain flag (sub-plan 10)', () {
+      final record = TrackedColonyRecord(
+        sessionId: 1,
+        trackId: 7,
+        healthHistory: [
+          HealthHistorySample(
+            label: 'CORAL',
+            confidence: 0.6,
+            at: DateTime.utc(2026, 1, 1, 12, 0),
+            uncertain: true,
+          ),
+          HealthHistorySample(
+            label: 'CORAL',
+            confidence: 0.9,
+            at: DateTime.utc(2026, 1, 1, 12, 1),
+          ),
+        ],
+        firstSeenAt: DateTime.utc(2026, 1, 1),
+        lastSeenAt: DateTime.utc(2026, 1, 1),
+      );
+
+      final restored = TrackedColonyRecord.fromMap(record.toMap());
+
+      expect(restored.healthHistory.map((s) => s.uncertain), [true, false]);
+    });
+
+    test('a history written before sub-plan 10 (no uncertain key) loads', () {
+      final map = TrackedColonyRecord(
+        sessionId: 1,
+        trackId: 7,
+        healthHistory: const [],
+        firstSeenAt: DateTime.utc(2026, 1, 1),
+        lastSeenAt: DateTime.utc(2026, 1, 1),
+      ).toMap();
+      map['health_history'] =
+          '[{"label":"CORAL","confidence":0.9,"at":"2026-01-01T12:00:00.000Z"}]';
+
+      final restored = TrackedColonyRecord.fromMap(map);
+
+      expect(restored.healthHistory.single.uncertain, isFalse);
+    });
+
     test('round-trips an empty health history', () {
       final record = TrackedColonyRecord(
         sessionId: 1,

@@ -77,6 +77,31 @@ void main() {
       expect(recorder.samplesFor(1), isEmpty);
     });
 
+    // Sub-plan 10, step 3: low-confidence samples are kept in the history
+    // (it's the raw record) but flagged, since HealthAggregator ignores them.
+    test('a sample below the confidence floor is kept and flagged uncertain',
+        () {
+      final recorder = HealthHistoryRecorder();
+      recorder.record(
+        1,
+        const ColonyHealth(label: 'CORAL_BL', confidence: 0.65),
+        DateTime.utc(2026, 1, 1),
+      );
+
+      expect(recorder.samplesFor(1).single.uncertain, isTrue);
+    });
+
+    test('a sample at or above the floor is not uncertain', () {
+      final recorder = HealthHistoryRecorder();
+      recorder.record(
+        1,
+        const ColonyHealth(label: 'CORAL', confidence: 0.7),
+        DateTime.utc(2026, 1, 1),
+      );
+
+      expect(recorder.samplesFor(1).single.uncertain, isFalse);
+    });
+
     test('samplesFor returns an unmodifiable view', () {
       final recorder = HealthHistoryRecorder();
       recorder.record(

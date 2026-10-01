@@ -8,7 +8,9 @@ import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
 import '../tracking/tracker_detection.dart';
 import 'bleaching_classifier.dart';
+import 'classification_policy.dart';
 import 'classification_scheduler.dart';
+import 'crop_geometry.dart';
 import 'live_loop_metrics.dart';
 
 /// What a detection carries through [BoTSortTracker] as its opaque
@@ -16,10 +18,18 @@ import 'live_loop_metrics.dart';
 /// no longer rides on the payload (sub-plan 09, step 2) -- it's classified
 /// later, by track id, through [ClassificationScheduler].
 class LiveDetectionPayload {
-  const LiveDetectionPayload({required this.box, this.mask});
+  const LiveDetectionPayload({
+    required this.box,
+    this.mask,
+    this.score = 1.0,
+  });
 
   final Rect box;
   final List<List<double>>? mask;
+
+  /// The segmentation confidence of this detection, gated against
+  /// `ClassificationPolicy.classifySegFloor` before classifying (sub-plan 10).
+  final double score;
 }
 
 /// The live screen's per-streaming-event logic (sub-plan 09), kept out of
@@ -47,6 +57,7 @@ class LiveFrameProcessor {
     required this.onHealth,
     this.metrics,
     this.useLegacyLoop = false,
+    this.cropStyle = CropStyle.insideMaskSquare,
     Duration reclassifyEvery = const Duration(seconds: 1),
     int maxPerFrame = 3,
     DateTime Function()? now,
@@ -71,8 +82,21 @@ class LiveFrameProcessor {
   /// mid-session could let a stale legacy update rewind the tracker after
   /// newer decoupled ones, and run two classifier calls at once.
   final bool useLegacyLoop;
+
+  /// How classifier crops are cut (sub-plan 10). Fixed per session, like
+  /// [useLegacyLoop]. Ignored by the legacy loop, which keeps its old crop.
+  final CropStyle cropStyle;
+
   final DateTime Function() _now;
   late final ClassificationScheduler _scheduler;
+
+  /// After an insufficient view, how long before that track's crop is tried
+  /// again. Much shorter than `reclassifyEvery` -- the colony may come into
+  /// full view a moment later -- but long enough that a colony sitting
+  /// half-out of frame isn't re-cropped (distance transform + coverage) on
+  /// every 8 Hz event, and the overlay's `skip` counts samples, not events.
+  static const insufficientViewRetry = Duration(milliseconds: 250);
+  final Map<int, DateTime> _insufficientRetryAt = {};
 
   /// Called after every tracker update with the tracker's current tracks.
   /// Each one's `payload` is a [LiveDetectionPayload] from this frame.
@@ -118,21 +142,59 @@ class LiveFrameProcessor {
     metrics?.recordTrackerUpdate();
     onTracks(tracks);
 
-    if (frame == null) return;
+    // A busy scheduler would refuse the offer anyway, so skip the crop work.
+    if (frame == null || _scheduler.isBusy) return;
+    final sampledAt = _now();
     _scheduler.offer(
       frameBytes: frame.bytes,
       frameWidth: frame.width,
       frameHeight: frame.height,
-      candidates: [
-        for (final track in tracks)
-          if (track.isActivated && track.payload is LiveDetectionPayload)
-            ClassificationCandidate(
-              trackId: track.trackId,
-              box: (track.payload! as LiveDetectionPayload).box,
-            ),
-      ],
-      sampledAt: _now(),
+      candidates: _candidates(tracks, frame.width, frame.height, sampledAt),
+      sampledAt: sampledAt,
     );
+  }
+
+  /// This frame's classifiable tracks, each with the crop window to classify
+  /// (sub-plan 10, steps 1-2). A track is a candidate only if it is
+  /// confirmed, its detection scored at least `classifySegFloor`, and it is
+  /// due; its crop is then cut under [cropStyle]. An `insideMaskSquare` crop
+  /// with no usable mask, or coverage below `minCoverage`, is "insufficient
+  /// view": not classified and not stamped as attempted, so the track stays
+  /// due and is retried after [insufficientViewRetry].
+  List<ClassificationCandidate> _candidates(
+    List<STrack> tracks,
+    int frameWidth,
+    int frameHeight,
+    DateTime at,
+  ) {
+    final candidates = <ClassificationCandidate>[];
+    for (final track in tracks) {
+      final payload = track.payload;
+      if (!track.isActivated || payload is! LiveDetectionPayload) continue;
+      if (payload.score < ClassificationPolicy.classifySegFloor) continue;
+      if (!_scheduler.isDue(track.trackId, at)) continue;
+      final retryAt = _insufficientRetryAt[track.trackId];
+      if (retryAt != null && at.isBefore(retryAt)) continue;
+
+      final crop = computeClassifierCrop(
+        style: cropStyle,
+        box: payload.box,
+        mask: payload.mask,
+        frameWidth: frameWidth,
+        frameHeight: frameHeight,
+      );
+      if (crop == null ||
+          (cropStyle == CropStyle.insideMaskSquare &&
+              crop.coverage < ClassificationPolicy.minCoverage)) {
+        metrics?.recordInsufficientView();
+        _insufficientRetryAt[track.trackId] = at.add(insufficientViewRetry);
+        continue;
+      }
+      candidates.add(
+        ClassificationCandidate(trackId: track.trackId, box: crop.window),
+      );
+    }
+    return candidates;
   }
 
   Future<void> _handleLegacy(
@@ -210,7 +272,11 @@ class LiveFrameProcessor {
             x2: r.boundingBox.right,
             y2: r.boundingBox.bottom,
             score: r.confidence,
-            payload: LiveDetectionPayload(box: r.boundingBox, mask: r.mask),
+            payload: LiveDetectionPayload(
+              box: r.boundingBox,
+              mask: r.mask,
+              score: r.confidence,
+            ),
           ),
         )
         .toList(growable: false);
