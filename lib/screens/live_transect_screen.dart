@@ -9,6 +9,8 @@ import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 import '../services/app_settings.dart';
 import '../services/bleaching_classifier.dart';
 import '../services/colony_size.dart';
+import '../services/device_health_monitor.dart';
+import '../services/device_info.dart';
 import '../services/health_aggregator.dart';
 import '../services/health_history_recorder.dart';
 import '../services/live_frame_processor.dart';
@@ -24,6 +26,7 @@ import '../services/transect_session.dart';
 import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
 import '../widgets/glove_button.dart';
+import '../widgets/live/device_health_badge.dart';
 import '../widgets/live/diagnostics_overlay.dart';
 import '../widgets/live/end_transect_sheet.dart';
 import '../widgets/live/live_error_banner.dart';
@@ -59,6 +62,9 @@ class LiveTransectScreen extends StatefulWidget {
     this.siteName,
     this.observerName,
     this.screenAwake = const WakelockScreenAwake(),
+    this.storageInfo = const PlatformDeviceInfo(),
+    this.batteryInfo = const BatteryPlusInfo(),
+    this.thermalInfo = const PlatformDeviceInfo(),
   });
 
   /// Physical marked transect tape length, collected up front by
@@ -73,6 +79,12 @@ class LiveTransectScreen extends StatefulWidget {
   /// Keeps the screen from auto-locking for exactly this Live session
   /// (sub-plan 11 step 1). Injectable for tests.
   final ScreenAwake screenAwake;
+
+  /// Storage, battery and heat during Live (sub-plan 13 step 3). Injectable
+  /// for consistency with [screenAwake].
+  final StorageInfo storageInfo;
+  final BatteryInfo batteryInfo;
+  final ThermalInfo thermalInfo;
 
   @override
   State<LiveTransectScreen> createState() => _LiveTransectScreenState();
@@ -110,6 +122,12 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   // goes through its single queue.
   late final ScreenAwakeLease _screenAwake;
   SessionCheckpointer? _checkpointer;
+
+  // Sub-plan 13 step 3: HUD badge, plus the thermal peak and rise count on
+  // the session. A change is written through the checkpointer's queue as it
+  // happens (so a crash keeps it), and once more at finalize (covering one
+  // that landed before `_startSession` created the checkpointer).
+  late final DeviceHealthMonitor _deviceHealth;
 
   // `_startSession()` runs fire-and-forget from a post-frame callback, and
   // can still be mid-flight (awaiting the dialog, the DB open, or the
@@ -164,6 +182,12 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     // Sub-plan 11: no auto-lock mid-transect, and a checkpoint the moment
     // the app leaves the foreground (`didChangeAppLifecycleState`).
     _screenAwake = ScreenAwakeLease(widget.screenAwake)..acquire();
+    _deviceHealth = DeviceHealthMonitor(
+      storage: widget.storageInfo,
+      battery: widget.batteryInfo,
+      thermal: widget.thermalInfo,
+      onThermalChange: (peak, rises) => _checkpointer?.recordThermal(peak, rises),
+    )..start();
     WidgetsBinding.instance.addObserver(this);
     _recorder = TransectRecorder(
       startRecording: _yoloController.startRecording,
@@ -271,6 +295,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     _tickTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _screenAwake.release();
+    _deviceHealth.dispose();
 
     // Decision 7: restore the app-wide portrait default (`main.dart`) on
     // leaving Live. Fire-and-forget, same reasoning as the lock in
@@ -384,6 +409,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
         records.add(_colonyRecord(sessionId, trackId, maskPath: maskPath));
       }
       await db.upsertColonies(records);
+      final thermalPeak = _deviceHealth.thermalPeak;
+      if (thermalPeak != null) {
+        await db.recordThermal(sessionId, thermalPeak, _deviceHealth.thermalRises);
+      }
       await db.closeSession(
         sessionId,
         DateTime.now().toUtc(),
@@ -538,7 +567,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     _lastLoopLogAt = now;
     final loop = _frameProcessor.useLegacyLoop ? 'legacy' : 'decoupled';
     final crop = _frameProcessor.cropStyle.name;
-    debugPrint('ReefSight: live loop ($loop, $crop): ${summary.format()}');
+    final thermal = _deviceHealth.health.value?.thermalLevel?.name ?? '--';
+    debugPrint(
+      'ReefSight: live loop ($loop, $crop): ${summary.format()} thermal=$thermal',
+    );
   }
 
   /// Called by [LiveFrameProcessor] after every tracker update.
@@ -679,10 +711,23 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
               left: 12,
               top: 12,
               child: SafeArea(
-                child: RecordingIndicator(
-                  isRecording: _recorder.isRecording,
-                  elapsed: elapsed,
-                  errorMessage: _recordingError,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    RecordingIndicator(
+                      isRecording: _recorder.isRecording,
+                      elapsed: elapsed,
+                      errorMessage: _recordingError,
+                    ),
+                    // Sub-plan 13 step 3: heat, battery or storage needing
+                    // attention -- beside the indicator, on the HUD edge,
+                    // never over the frame (sub-plan 06 decision 4).
+                    const SizedBox(width: 8),
+                    ValueListenableBuilder<DeviceHealth?>(
+                      valueListenable: _deviceHealth.health,
+                      builder: (context, health, _) => DeviceHealthBadge(health: health),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -755,6 +800,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
                       healthAggregator: _healthAggregator,
                       sizesPx: _latestSizePx,
                       checkpointFailures: _checkpointer?.failureCount ?? 0,
+                      thermal: _deviceHealth.health.value?.thermalLevel,
                     ),
                   ),
                 );

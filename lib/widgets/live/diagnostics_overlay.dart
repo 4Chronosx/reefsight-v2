@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../services/device_checks.dart';
 import '../../services/health_aggregator.dart';
 import '../../tracking/strack.dart';
 
@@ -20,7 +21,12 @@ class DiagnosticsOverlay extends StatelessWidget {
     required this.sizesPx,
     this.loopSummary,
     this.checkpointFailures = 0,
+    this.thermal,
   });
+
+  /// Current iOS thermal state (sub-plan 13 step 3), so a frame-rate drop
+  /// can be matched to heat. `null` when unreadable.
+  final ThermalLevel? thermal;
 
   /// Failed colony checkpoints this session (`SessionCheckpointer`,
   /// sub-plan 11) -- a data write failing must be visible, not swallowed.
@@ -55,6 +61,11 @@ class DiagnosticsOverlay extends StatelessWidget {
           if (loopSummary != null)
             Text(
               loopSummary!,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          if (thermal != null)
+            Text(
+              'thermal: ${thermal!.name}',
               style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
           if (checkpointFailures > 0)

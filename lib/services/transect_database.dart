@@ -1,6 +1,7 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import 'device_checks.dart';
 import 'health_aggregator.dart';
 import 'session_summary.dart';
 import 'tracked_colony_record.dart';
@@ -30,8 +31,9 @@ class TransectDatabase {
   /// `reefsight.db` from before either change needs `onUpgrade` to actually
   /// gain the new columns, or every subsequent `insertSession()` throws
   /// `no such column: ...`. 3 -> 4 added the checkpoint/interruption
-  /// columns (sub-plan 11: live session safety).
-  static const _schemaVersion = 4;
+  /// columns (sub-plan 11: live session safety). 4 -> 5 added the thermal
+  /// peak and rise count (sub-plan 13: pre-dive checks).
+  static const _schemaVersion = 5;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -87,7 +89,9 @@ class TransectDatabase {
         last_checkpoint_at TEXT,
         interruption_count INTEGER,
         first_interrupted_at TEXT,
-        last_interrupted_at TEXT
+        last_interrupted_at TEXT,
+        thermal_peak TEXT,
+        thermal_rise_count INTEGER
       )
     ''');
     await db.execute('''
@@ -110,7 +114,8 @@ class TransectDatabase {
 
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
   /// order -- 1 -> 2 added `site_name`/`observer_name`, 2 -> 3 added
-  /// `video_path`, 3 -> 4 added the checkpoint/interruption columns.
+  /// `video_path`, 3 -> 4 added the checkpoint/interruption columns, 4 -> 5
+  /// added `thermal_peak`/`thermal_rise_count`.
   /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
   /// read back as `null`, matching `TransectSession.fromMap`'s
   /// already-nullable handling of every added column).
@@ -131,6 +136,10 @@ class TransectDatabase {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN interruption_count INTEGER');
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN first_interrupted_at TEXT');
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN last_interrupted_at TEXT');
+    }
+    if (oldVersion < 5) {
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN thermal_peak TEXT');
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN thermal_rise_count INTEGER');
     }
   }
 
@@ -221,6 +230,18 @@ class TransectDatabase {
           last_interrupted_at = ?
       WHERE id = ?
     ''', [stamp, stamp, sessionId]);
+  }
+
+  /// Stores the session's thermal peak and rise count so far -- sub-plan 13
+  /// step 3. Overwrites rather than increments: `DeviceHealthMonitor` owns
+  /// the running values, so a repeated write is harmless.
+  Future<void> recordThermal(int sessionId, ThermalLevel peak, int rises) async {
+    await _db.update(
+      _sessionsTable,
+      {'thermal_peak': peak.name, 'thermal_rise_count': rises},
+      where: 'id = ?',
+      whereArgs: [sessionId],
+    );
   }
 
   Future<List<TrackedColonyRecord>> colonyRowsForSession(

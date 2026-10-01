@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/bleaching_classifier.dart';
+import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/tracking/bot_sort_tracker.dart';
 import 'package:reefsight_mobile/tracking/tracker_detection.dart';
@@ -165,6 +166,28 @@ void main() {
 
     await tester.pumpWidget(overlay(3));
     expect(find.text('checkpoint failed ×3'), findsOneWidget);
+  });
+
+  // Sub-plan 13 step 3: the diagnostics carry the current thermal state, so
+  // a frame-rate drop in a field transect can be matched to heat.
+  testWidgets('DiagnosticsOverlay shows the thermal state when known',
+      (tester) async {
+    Widget overlay(ThermalLevel? thermal) => _wrapLandscape(
+      tester,
+      DiagnosticsOverlay(
+        segProcessingMs: 12.3,
+        tracks: const [],
+        healthAggregator: HealthAggregator(),
+        sizesPx: const {},
+        thermal: thermal,
+      ),
+    );
+
+    await tester.pumpWidget(overlay(null));
+    expect(find.textContaining('thermal:'), findsNothing);
+
+    await tester.pumpWidget(overlay(ThermalLevel.serious));
+    expect(find.text('thermal: serious'), findsOneWidget);
   });
 
   testWidgets(

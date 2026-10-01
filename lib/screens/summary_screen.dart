@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/device_checks.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/tracked_colony_record.dart';
@@ -452,6 +453,13 @@ class _TechnicalTab extends StatefulWidget {
 }
 
 class _TechnicalTabState extends State<_TechnicalTab> {
+  /// Sub-plan 13 step 4: says when the phone got hot enough for iOS to
+  /// throttle it, so a frame-rate drop in this transect can be explained.
+  static String? _thermalNote(ThermalLevel? peak) {
+    if (peak == null || peak.index < ThermalLevel.serious.index) return null;
+    return 'Device got hot (${peak.name}) during this transect.';
+  }
+
   bool _isExporting = false;
   String? _exportError;
   String? _csvPath;
@@ -517,6 +525,14 @@ class _TechnicalTabState extends State<_TechnicalTab> {
           '${report.bleachingPrevalenceFraction == null ? '--' : '${(report.bleachingPrevalenceFraction! * 100).toStringAsFixed(1)}%'}',
           style: const TextStyle(color: AppColors.onSurface, fontSize: 13),
         ),
+        if (_thermalNote(report.session.thermalPeak) case final note?)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              note,
+              style: TextStyle(color: Colors.amber.shade900, fontSize: 13),
+            ),
+          ),
         const SizedBox(height: 20),
         const Text(
           'Size-Frequency Distribution',

@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../services/app_database.dart';
+import '../services/device_health_monitor.dart';
+import '../services/device_info.dart';
 import '../widgets/glove_button.dart';
+import '../widgets/ready_to_dive_card.dart';
 import '../widgets/section_card.dart';
 import 'live_transect_screen.dart';
 
@@ -17,11 +20,23 @@ const kTapeLengthPresetsMeters = [50, 75, 100];
 /// `ReefSight_Specification.md`'s "Density, positioning, and sync") plus
 /// site/observer metadata -- v1's GPS start/end-point pickers stay dropped.
 class TransectSetupScreen extends StatefulWidget {
-  const TransectSetupScreen({super.key, this.openDatabase = openAppDatabase});
+  const TransectSetupScreen({
+    super.key,
+    this.openDatabase = openAppDatabase,
+    this.storageInfo = const PlatformDeviceInfo(),
+    this.batteryInfo = const BatteryPlusInfo(),
+    this.thermalInfo = const PlatformDeviceInfo(),
+  });
 
   /// Injectable so widget tests can substitute an in-memory DB instead of
   /// `path_provider` (no platform channel under `flutter test`).
   final DatabaseOpener openDatabase;
+
+  /// Sub-plan 13: the "Ready to dive" checks. Injectable so widget tests can
+  /// use fakes -- the real ones are platform channels.
+  final StorageInfo storageInfo;
+  final BatteryInfo batteryInfo;
+  final ThermalInfo thermalInfo;
 
   @override
   State<TransectSetupScreen> createState() => _TransectSetupScreenState();
@@ -31,11 +46,20 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
   final _tapeLengthController = TextEditingController(text: '50');
   final _siteController = TextEditingController();
   final _observerController = TextEditingController();
+  late final DeviceHealthMonitor _deviceHealth;
 
   @override
   void initState() {
     super.initState();
     _prefillFromLastSession();
+    // Battery level and free storage don't stream, so re-read them while
+    // the diver sits on this screen (e.g. after plugging in).
+    _deviceHealth = DeviceHealthMonitor(
+      storage: widget.storageInfo,
+      battery: widget.batteryInfo,
+      thermal: widget.thermalInfo,
+      pollInterval: const Duration(seconds: 30),
+    )..start();
   }
 
   /// Prefill is a convenience, not a requirement (sub-plan step 5: "avoids
@@ -83,6 +107,7 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
 
   @override
   void dispose() {
+    _deviceHealth.dispose();
     _tapeLengthController.dispose();
     _siteController.dispose();
     _observerController.dispose();
@@ -174,6 +199,11 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 16),
+            ValueListenableBuilder<DeviceHealth?>(
+              valueListenable: _deviceHealth.health,
+              builder: (context, health, _) => ReadyToDiveCard(health: health),
             ),
             const SizedBox(height: 16),
             const SectionCard(

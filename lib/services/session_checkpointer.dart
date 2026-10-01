@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import 'device_checks.dart';
 import 'tracked_colony_record.dart';
 import 'transect_database.dart';
 
@@ -137,6 +138,21 @@ class SessionCheckpointer {
       }
     });
     return Future.wait([interruption, checkpoint()]);
+  }
+
+  /// Sub-plan 13 step 3: stores the thermal peak and rise count the moment
+  /// they change, so a crash mid-transect keeps them. Queued like every
+  /// other write, so it can't land after finalize has closed the DB.
+  Future<void> recordThermal(ThermalLevel peak, int rises) {
+    if (_closed) return Future.value();
+    return _enqueue(() async {
+      if (_closed) return;
+      try {
+        await _db.recordThermal(_sessionId, peak, rises);
+      } catch (error) {
+        _fail('thermal record', error);
+      }
+    });
   }
 
   /// Stops all further checkpoints, waits for an in-flight one, then runs

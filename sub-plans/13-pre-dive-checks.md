@@ -55,6 +55,28 @@ code in `lib/`):
   red.
 - Live HUD badge widget test, with the thermal stream changing.
 
+## Implementation notes (2026-10-01)
+
+Code is in; the device checks below are still open.
+
+- **Storage via the Swift channel, not a pub package.** Thermal needs Swift anyway, so `reefsight/device`
+  (`freeBytes`, `thermalState`) and `reefsight/thermal` (event stream) in `ios/Runner/AppDelegate.swift`
+  cover both. Battery is `battery_plus`. Off iOS, storage and heat read as **unavailable** (grey), never ok.
+- **One `DeviceHealthMonitor`** (`lib/services/device_health_monitor.dart`) backs both the Setup card and the
+  Live badge. Battery level and storage are polled (Setup 30 s, Live 60 s). Thermal is read once and then
+  follows the stream only, because a polled re-read could land after a newer stream event and count a
+  rise that never happened.
+- **A "rise" is every step up**, including heating again after cooling: nominal → serious → fair → serious
+  is two rises.
+- **Session columns (schema v5):** `thermal_peak` (enum name) and `thermal_rise_count`. Written through
+  `SessionCheckpointer`'s queue whenever they change, and again at finalize. Sub-plan 12 also bumps the
+  schema, so whichever lands second takes v6.
+- **The thermal stream is a single static stream in Dart.** Setup stays mounted under Live, and separate
+  `receiveBroadcastStream()` calls would replace each other's channel handler.
+- **The entry position row is a grey placeholder** until sub-plan 12 lands.
+- **Live badge:** sits beside the recording indicator, top-left. It shows "Phone hot" / "Phone very hot",
+  "Battery low" and "Storage low".
+
 ## Done when
 - On a device, Setup shows real storage, battery and thermal values, and a low-battery state turns the card
   amber or red.

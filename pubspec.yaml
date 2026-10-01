@@ -72,6 +72,11 @@ dependencies:
   # dependency at this version -- promoted, not newly added.
   wakelock_plus: ^1.5.2
 
+  # Sub-plan 13 (pre-dive checks): battery level and charging state for the
+  # Setup "Ready to dive" card and the Live HUD badge. Free storage and the
+  # thermal state come from a small platform channel in AppDelegate.swift.
+  battery_plus: ^7.1.1
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:sqflite/sqflite.dart' show openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
@@ -382,6 +383,85 @@ void main() {
       expect(stored!.interruptionCount, 2);
       expect(stored.firstInterruptedAt, DateTime.utc(2026, 1, 1, 0, 3));
       expect(stored.lastInterruptedAt, DateTime.utc(2026, 1, 1, 0, 9));
+    });
+  });
+
+  // Sub-plan 13 step 3: thermal peak and rise count (schema v5).
+  group('TransectDatabase schema v5', () {
+    test('upgrading a v4 file keeps existing rows; thermal columns read back null',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v4_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v4 sessions table exactly as `_createSchema` wrote it before v5.
+      final v4 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 4,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT,
+              last_checkpoint_at TEXT,
+              interruption_count INTEGER,
+              first_interrupted_at TEXT,
+              last_interrupted_at TEXT
+            )
+          ''');
+        },
+      );
+      final sessionId = await v4.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'interruption_count': 1,
+      });
+      await v4.close();
+
+      final db = await TransectDatabase.open(dir.path);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.interruptionCount, 1);
+      expect(stored.thermalPeak, isNull);
+      expect(stored.thermalRiseCount, isNull);
+
+      await db.recordThermal(sessionId, ThermalLevel.serious, 1);
+      expect((await db.sessionById(sessionId))!.thermalPeak, ThermalLevel.serious);
+
+      // Closed before the temp dir is deleted (Windows holds the file open).
+      await db.close();
+    });
+
+    test('recordThermal overwrites with the latest peak and count', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 10),
+      );
+
+      await db.recordThermal(sessionId, ThermalLevel.serious, 1);
+      await db.recordThermal(sessionId, ThermalLevel.critical, 3);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.thermalPeak, ThermalLevel.critical);
+      expect(stored.thermalRiseCount, 3);
+    });
+
+    test('an unrecognised stored thermal value reads back as null', () {
+      final session = TransectSession.fromMap({
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 10.0,
+        'belt_width_meters': 1.0,
+        'thermal_peak': 'molten',
+      });
+      expect(session.thermalPeak, isNull);
     });
   });
 }

@@ -1,3 +1,5 @@
+import 'device_checks.dart';
+
 /// One transect run: identity plus the physical tape length that serves as
 /// the density denominator.
 ///
@@ -23,6 +25,8 @@ class TransectSession {
     this.interruptionCount,
     this.firstInterruptedAt,
     this.lastInterruptedAt,
+    this.thermalPeak,
+    this.thermalRiseCount,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -65,6 +69,13 @@ class TransectSession {
   final DateTime? firstInterruptedAt;
   final DateTime? lastInterruptedAt;
 
+  /// The hottest iOS thermal state Live saw, and how many times the state
+  /// stepped up -- sub-plan 13 step 3. They explain a frame-rate drop in the
+  /// report and the thesis. `null` if the state was never readable (not
+  /// iOS) or the session predates schema v5.
+  final ThermalLevel? thermalPeak;
+  final int? thermalRiseCount;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
@@ -78,6 +89,8 @@ class TransectSession {
     int? interruptionCount,
     DateTime? firstInterruptedAt,
     DateTime? lastInterruptedAt,
+    ThermalLevel? thermalPeak,
+    int? thermalRiseCount,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -92,6 +105,8 @@ class TransectSession {
       interruptionCount: interruptionCount ?? this.interruptionCount,
       firstInterruptedAt: firstInterruptedAt ?? this.firstInterruptedAt,
       lastInterruptedAt: lastInterruptedAt ?? this.lastInterruptedAt,
+      thermalPeak: thermalPeak ?? this.thermalPeak,
+      thermalRiseCount: thermalRiseCount ?? this.thermalRiseCount,
     );
   }
 
@@ -110,6 +125,8 @@ class TransectSession {
         'interruption_count': interruptionCount,
         'first_interrupted_at': firstInterruptedAt?.toIso8601String(),
         'last_interrupted_at': lastInterruptedAt?.toIso8601String(),
+        'thermal_peak': thermalPeak?.name,
+        'thermal_rise_count': thermalRiseCount,
       };
 
   static DateTime? _parseNullable(Object? raw) =>
@@ -130,6 +147,8 @@ class TransectSession {
       interruptionCount: map['interruption_count'] as int?,
       firstInterruptedAt: _parseNullable(map['first_interrupted_at']),
       lastInterruptedAt: _parseNullable(map['last_interrupted_at']),
+      thermalPeak: ThermalLevel.values.asNameMap()[map['thermal_peak']],
+      thermalRiseCount: map['thermal_rise_count'] as int?,
     );
   }
 }

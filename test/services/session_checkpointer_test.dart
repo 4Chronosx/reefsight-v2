@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:reefsight_mobile/services/session_checkpointer.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
@@ -293,6 +294,43 @@ void main() {
 
       expect(await db.colonyRowsForSession(sessionId), isEmpty);
       expect((await db.sessionById(sessionId))!.interruptionCount, isNull);
+    });
+  });
+
+  // Sub-plan 13 step 3: the thermal peak goes through the same write queue,
+  // so it can't land on a DB that finalize has already closed.
+  group('SessionCheckpointer.recordThermal', () {
+    test('writes the peak and rise count to the session', () async {
+      final cp = checkpointer();
+
+      await cp.recordThermal(ThermalLevel.serious, 2);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.thermalPeak, ThermalLevel.serious);
+      expect(stored.thermalRiseCount, 2);
+    });
+
+    test('a failed write is counted and reported, not thrown', () async {
+      final failures = <Object>[];
+      final cp = checkpointer(onFailure: failures.add);
+      await db.close();
+
+      await cp.recordThermal(ThermalLevel.critical, 1);
+
+      expect(cp.failureCount, 1);
+      expect(failures, hasLength(1));
+
+      // Reopen so tearDown's close() has something to close.
+      db = await TransectDatabase.openInMemoryForTest();
+    });
+
+    test('is a no-op once finalized', () async {
+      final cp = checkpointer();
+      await cp.finalize(() async {});
+
+      await cp.recordThermal(ThermalLevel.critical, 1);
+
+      expect((await db.sessionById(sessionId))!.thermalPeak, isNull);
     });
   });
 }

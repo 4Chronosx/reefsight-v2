@@ -3,9 +3,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/app_shell.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
+import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
+
+import '../support/fake_device.dart';
 
 // Sub-plan 6 (ui-ux-overhaul), step 8: "Summary's 'Done' returns to the
 // shell, not to Setup." Builds the same route shape the real app produces
@@ -41,6 +44,7 @@ void main() {
     // against a route merely *named* `AppShell.routeName`, without needing
     // the real widget behind it.
     const shellPlaceholder = Key('shell-placeholder');
+    final device = FakeDevice();
 
     await tester.pumpWidget(
       MaterialApp(navigatorObservers: [routeObserver], home: const SizedBox()),
@@ -60,7 +64,13 @@ void main() {
     // then Summary pushed on top -- exactly the shape `pushReplacement` used
     // to leave broken (`live_transect_screen.dart`'s pre-sub-plan-6 bug).
     navigator.push(
-      MaterialPageRoute(builder: (_) => const TransectSetupScreen()),
+      MaterialPageRoute(
+        builder: (_) => TransectSetupScreen(
+          storageInfo: device,
+          batteryInfo: device,
+          thermalInfo: device,
+        ),
+      ),
     );
     await tester.pump();
     // `SummaryScreen`'s own report load (real `sqflite_common_ffi` I/O)
@@ -277,6 +287,46 @@ void main() {
         find.text('The app was interrupted once during this transect.'),
         findsOneWidget,
       );
+    });
+
+    // Sub-plan 13 step 4: the Technical tab says when the device got hot,
+    // so a frame-rate drop in the report can be explained.
+    group('thermal note on the Technical tab', () {
+      Future<void> openTechnicalTab(WidgetTester tester) async {
+        await tester.tap(find.text('Technical Detail'));
+        await tester.pumpAndSettle();
+      }
+
+      for (final (peak, expected) in [
+        (ThermalLevel.serious, 'Device got hot (serious) during this transect.'),
+        (ThermalLevel.critical, 'Device got hot (critical) during this transect.'),
+      ]) {
+        testWidgets('a ${peak.name} peak is reported', (tester) async {
+          final db = await TransectDatabase.openInMemoryForTest();
+          addTearDown(db.close);
+          final sessionId = await seed(db, endedAt: DateTime.utc(2026, 10, 1, 9, 50));
+          await db.recordThermal(sessionId, peak, 1);
+
+          await pumpSummary(tester, db, sessionId);
+          await openTechnicalTab(tester);
+
+          expect(find.text(expected), findsOneWidget);
+        });
+      }
+
+      testWidgets('a fair peak, or no reading, says nothing', (tester) async {
+        final db = await TransectDatabase.openInMemoryForTest();
+        addTearDown(db.close);
+        final warm = await seed(db, endedAt: DateTime.utc(2026, 10, 1, 9, 50));
+        await db.recordThermal(warm, ThermalLevel.fair, 1);
+        final unknown = await seed(db, endedAt: DateTime.utc(2026, 10, 1, 9, 50));
+
+        for (final sessionId in [warm, unknown]) {
+          await pumpSummary(tester, db, sessionId);
+          await openTechnicalTab(tester);
+          expect(find.textContaining('Device got hot'), findsNothing);
+        }
+      });
     });
   });
 }
