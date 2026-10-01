@@ -65,6 +65,7 @@ dependencies:
   csv: ^6.0.0
   share_plus: ^10.1.4
   google_fonts: ^6.2.1
+  video_player: ^2.11.1
 
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only

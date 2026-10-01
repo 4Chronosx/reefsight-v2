@@ -9,8 +9,10 @@ import '../services/app_database.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/tracked_colony_record.dart';
+import '../services/transect_video.dart';
 import '../widgets/health_chip.dart';
 import 'app_shell.dart';
+import 'video_player_screen.dart';
 
 /// Sub-plan 5 (ui-and-reporting) tasks 4-5, restyled by sub-plan 6
 /// (ui-ux-overhaul) step 4: the post-dive report, two tabs on one dataset
@@ -40,6 +42,11 @@ class SummaryScreen extends StatefulWidget {
 class _SummaryScreenState extends State<SummaryScreen> {
   late final Future<TransectReport> _reportFuture = _loadReport();
 
+  /// The session's recording, if one exists on disk -- resolved alongside
+  /// the report (see `transect_video.dart` for why the stored path alone
+  /// isn't trusted). `null` means no playable video for this session.
+  File? _videoFile;
+
   Future<TransectReport> _loadReport() async {
     final db = await widget.openDatabase();
     try {
@@ -48,6 +55,13 @@ class _SummaryScreenState extends State<SummaryScreen> {
         throw StateError('Transect session ${widget.sessionId} not found');
       }
       final colonies = await db.colonyRowsForSession(widget.sessionId);
+      try {
+        _videoFile = await resolveTransectVideo(session.videoPath);
+      } catch (error) {
+        // A video lookup failure (e.g. no path_provider under tests) must
+        // not take the whole report down with it.
+        debugPrint('ReefSight: failed to resolve transect video: $error');
+      }
       return TransectReport(session: session, colonies: colonies);
     } finally {
       await db.close();
@@ -90,7 +104,7 @@ class _SummaryScreenState extends State<SummaryScreen> {
                 child: Text('Failed to load report: ${snapshot.error}'),
               );
             }
-            return _ReportBody(report: snapshot.data!);
+            return _ReportBody(report: snapshot.data!, videoFile: _videoFile);
           },
         ),
       ),
@@ -102,13 +116,15 @@ class _SummaryScreenState extends State<SummaryScreen> {
 /// length" -- shared across both tabs, so it replaces the identity block the
 /// old Executive tab used to render at the top of its own `ListView`.
 class _ReportBody extends StatelessWidget {
-  const _ReportBody({required this.report});
+  const _ReportBody({required this.report, this.videoFile});
 
   final TransectReport report;
+  final File? videoFile;
 
   @override
   Widget build(BuildContext context) {
     final session = report.session;
+    final video = videoFile;
     return Column(
       children: [
         Container(
@@ -136,19 +152,38 @@ class _ReportBody extends StatelessWidget {
                   fontSize: 12,
                 ),
               ),
+              // Shared header, so the recording is reachable from either
+              // tab -- not only the bottom of the Technical tab's list.
+              if (video != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.play_circle_outline_rounded),
+                    label: const Text('Watch transect video'),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => VideoPlayerScreen(
+                          file: video,
+                          title: session.siteName ?? 'Transect video',
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
-        Expanded(child: _ReportTabs(report: report)),
+        Expanded(child: _ReportTabs(report: report, videoFile: video)),
       ],
     );
   }
 }
 
 class _ReportTabs extends StatelessWidget {
-  const _ReportTabs({required this.report});
+  const _ReportTabs({required this.report, this.videoFile});
 
   final TransectReport report;
+  final File? videoFile;
 
   @override
   Widget build(BuildContext context) {
@@ -169,7 +204,7 @@ class _ReportTabs extends StatelessWidget {
             child: TabBarView(
               children: [
                 _ExecutiveTab(report: report),
-                _TechnicalTab(report: report),
+                _TechnicalTab(report: report, videoFile: videoFile),
               ],
             ),
           ),
@@ -304,9 +339,13 @@ class _ExecutiveTab extends StatelessWidget {
 /// Academic-panel audience: per-colony detail, size-frequency histogram,
 /// and CSV export/share.
 class _TechnicalTab extends StatefulWidget {
-  const _TechnicalTab({required this.report});
+  const _TechnicalTab({required this.report, this.videoFile});
 
   final TransectReport report;
+
+  /// Already resolved to an existing file (or `null`) by
+  /// `_SummaryScreenState._loadReport`.
+  final File? videoFile;
 
   @override
   State<_TechnicalTab> createState() => _TechnicalTabState();
@@ -431,13 +470,13 @@ class _TechnicalTabState extends State<_TechnicalTab> {
               style: const TextStyle(color: AppColors.bleached, fontSize: 12),
             ),
           ),
-        if (_videoAvailable)
+        if (widget.videoFile != null)
           Padding(
             padding: const EdgeInsets.only(top: 12),
             child: SizedBox(
               height: 52,
               child: OutlinedButton.icon(
-                onPressed: _isSharingVideo ? null : () => _shareVideo(report.session.videoPath!),
+                onPressed: _isSharingVideo ? null : () => _shareVideo(widget.videoFile!.path),
                 icon: _isSharingVideo
                     ? const SizedBox(
                         width: 16,
@@ -459,16 +498,6 @@ class _TechnicalTabState extends State<_TechnicalTab> {
           ),
       ],
     );
-  }
-
-  /// The video path is only a stored string -- the file itself may be
-  /// missing (recording failed, or the OS reclaimed storage), so this
-  /// checks the disk directly rather than trusting a non-null
-  /// `videoPath` alone. Hides the button entirely rather than showing a
-  /// share action that would just fail.
-  bool get _videoAvailable {
-    final path = widget.report.session.videoPath;
-    return path != null && File(path).existsSync();
   }
 }
 

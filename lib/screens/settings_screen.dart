@@ -90,6 +90,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: FutureBuilder<int>(
               future: _sessionCount,
               builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Text(
+                    'Couldn\'t read survey data: ${snapshot.error}',
+                    style: const TextStyle(fontSize: 13, color: Colors.redAccent),
+                  );
+                }
                 final count = snapshot.data;
                 return Text(
                   count == null

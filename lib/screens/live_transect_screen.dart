@@ -676,13 +676,21 @@ class _LiveTransectScreenState extends State<LiveTransectScreen> {
                           style: const TextStyle(color: Colors.redAccent, fontSize: 13),
                         ),
                       ),
-                    GloveButton(
-                      label: _endingTransect ? 'Ending...' : 'End Transect',
-                      icon: Icons.stop_circle_outlined,
-                      destructive: true,
-                      inWater: true,
-                      busy: _endingTransect,
-                      onPressed: _confirmEndTransect,
+                    // Explicit width: the theme's ElevatedButton
+                    // `minimumSize` is `Size.fromHeight(...)` (infinite min
+                    // width), and this `Positioned` only pins right/bottom,
+                    // so without a bound the button can't lay out and never
+                    // paints -- the "no stop button" bug.
+                    SizedBox(
+                      width: 220,
+                      child: GloveButton(
+                        label: _endingTransect ? 'Ending...' : 'End Transect',
+                        icon: Icons.stop_circle_outlined,
+                        destructive: true,
+                        inWater: true,
+                        busy: _endingTransect,
+                        onPressed: _confirmEndTransect,
+                      ),
                     ),
                   ],
                 ),

@@ -32,10 +32,19 @@ class TransectDatabase {
   /// `no such column: ...`.
   static const _schemaVersion = 3;
 
+  /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
+  /// Live) opens, queries, then `close()`s its own handle. With sqflite's
+  /// default `singleInstance: true` they all share ONE cached connection, so
+  /// whichever tab finishes first closes it out from under the others --
+  /// `AppShell`'s `IndexedStack` builds Home/Surveys/Settings at once, and
+  /// the loser's query threw `database_closed` (Settings then sat on
+  /// "Loading..." forever, since its `FutureBuilder` treated the error as
+  /// no-data-yet).
   static Future<TransectDatabase> open(String directory) async {
     final db = await openDatabase(
       p.join(directory, 'reefsight.db'),
       version: _schemaVersion,
+      singleInstance: false,
       onCreate: (db, version) => _createSchema(db),
       onUpgrade: (db, oldVersion, newVersion) => _upgradeSchema(db, oldVersion),
       onOpen: (db) => db.execute('PRAGMA foreign_keys = ON'),
