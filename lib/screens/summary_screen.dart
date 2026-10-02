@@ -303,6 +303,30 @@ class _ReportHeader extends StatelessWidget {
                   ),
                 ),
               ),
+            )
+          // No video: say why, instead of silently leaving the button out.
+          else if (missingVideoNote(session, video) case final note?)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.videocam_off_outlined,
+                    size: 16,
+                    color: AppColors.onSurface.withValues(alpha: 0.6),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      note,
+                      style: TextStyle(
+                        color: AppColors.onSurface.withValues(alpha: 0.6),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
         ],
       ),

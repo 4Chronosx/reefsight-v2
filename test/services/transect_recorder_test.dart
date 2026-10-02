@@ -98,5 +98,34 @@ void main() {
 
       expect(recorder.currentOutputPath, isNull);
     });
+
+    // The fork's start/stop now throw instead of failing silently.
+    test('a failed start leaves no output path and is not recording', () async {
+      final recorder = TransectRecorder(
+        startRecording: (_) async => throw StateError('camera view not attached yet'),
+        stopRecording: () async {},
+      );
+
+      await expectLater(recorder.start('/documents'), throwsStateError);
+      expect(recorder.isRecording, isFalse);
+      expect(recorder.currentOutputPath, isNull);
+    });
+
+    test('a failed stop still ends the recording, so it is not retried forever', () async {
+      var stopCalls = 0;
+      final recorder = TransectRecorder(
+        startRecording: (_) async {},
+        stopRecording: () async {
+          stopCalls++;
+          throw StateError('recording_error');
+        },
+      );
+      await recorder.start('/documents');
+
+      await expectLater(recorder.stop(), throwsStateError);
+      expect(recorder.isRecording, isFalse);
+      await recorder.stop();
+      expect(stopCalls, 1);
+    });
   });
 }

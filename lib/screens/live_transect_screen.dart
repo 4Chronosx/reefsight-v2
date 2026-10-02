@@ -25,6 +25,7 @@ import '../services/tracked_colony_record.dart';
 import '../services/transect_database.dart';
 import '../services/transect_recorder.dart';
 import '../services/transect_session.dart';
+import '../services/transect_video.dart';
 import '../tracking/bot_sort_tracker.dart';
 import '../tracking/strack.dart';
 import '../widgets/glove_button.dart';
@@ -465,11 +466,18 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       if (thermalPeak != null) {
         await db.recordThermal(sessionId, thermalPeak, _deviceHealth.thermalRises);
       }
+      // Only a file that's really there: the native start can report
+      // success without recording, and a saved path to nothing used to hide
+      // Summary's video button silently. No video -> Summary says why.
+      final videoPath = await recordedVideoPath(_recorder.currentOutputPath);
+      if (videoPath == null && _recorder.currentOutputPath != null) {
+        debugPrint('ReefSight: no recording at ${_recorder.currentOutputPath}');
+      }
       await db.closeSession(
         sessionId,
         DateTime.now().toUtc(),
-        videoPath: _recorder.currentOutputPath,
-        videoStartedAt: _videoStartedAt,
+        videoPath: videoPath,
+        videoStartedAt: videoPath == null ? null : _videoStartedAt,
       );
     } finally {
       await db.close();
@@ -500,7 +508,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     try {
       await (_sessionStartFuture ?? Future.value());
       final sessionId = _sessionId;
-      await _recorder.stop();
+      try {
+        await _recorder.stop();
+      } catch (error) {
+        // A lost video must not trap the diver here: finalize anyway, and
+        // `recordedVideoPath` decides whether there's a file to keep.
+        debugPrint('ReefSight: failed to stop recording: $error');
+      }
       await _finalizeSession();
       // The transect is over; Summary may auto-lock normally. Not released
       // on failure -- the diver is still on this screen and may retry.

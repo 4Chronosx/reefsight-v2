@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_recorder.dart';
@@ -132,5 +134,77 @@ void main() {
   test('formatVideoTime pads minutes and seconds, adds hours past an hour', () {
     expect(formatVideoTime(const Duration(minutes: 3, seconds: 41)), '03:41');
     expect(formatVideoTime(const Duration(hours: 1, minutes: 2, seconds: 3)), '1:02:03');
+  });
+
+  recordingFailureTests();
+}
+
+// Recording failures used to be silent end to end: the native start
+// reported success even when it failed, End Transect saved the planned path
+// anyway, and Summary hid the video button without a word. Now the path is
+// saved only for a real, non-empty file, and Summary says why there's none.
+void recordingFailureTests() {
+  group('recordedVideoPath', () {
+    late Directory dir;
+
+    setUp(() => dir = Directory.systemTemp.createTempSync('reefsight_video_'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    test('keeps the path of a non-empty file', () async {
+      final file = File('${dir.path}/transect_a.mov')..writeAsBytesSync([1, 2, 3]);
+      expect(await recordedVideoPath(file.path), file.path);
+    });
+
+    test('drops a path whose file was never written', () async {
+      expect(await recordedVideoPath('${dir.path}/transect_missing.mov'), isNull);
+    });
+
+    test('drops an empty file', () async {
+      final file = File('${dir.path}/transect_empty.mov')..createSync();
+      expect(await recordedVideoPath(file.path), isNull);
+    });
+
+    test('no path (recording never started) stays null', () async {
+      expect(await recordedVideoPath(null), isNull);
+    });
+  });
+
+  group('missingVideoNote', () {
+    final start = DateTime.utc(2026, 10, 1, 9);
+
+    TransectSession session({String? videoPath, bool ended = true}) => TransectSession(
+          startedAt: start,
+          endedAt: ended ? start.add(const Duration(minutes: 30)) : null,
+          tapeLengthMeters: 50,
+          videoPath: videoPath,
+        );
+
+    test('no note when the video was found', () {
+      expect(
+        missingVideoNote(session(videoPath: '/x/transect_a.mov'), File('/x/transect_a.mov')),
+        isNull,
+      );
+    });
+
+    test('a survey that did not end normally', () {
+      expect(
+        missingVideoNote(session(ended: false), null),
+        "No video: this survey didn't end normally, so its recording wasn't saved.",
+      );
+    });
+
+    test('ended, but no recording was saved', () {
+      expect(
+        missingVideoNote(session(), null),
+        "No video: the camera didn't record a file during this survey.",
+      );
+    });
+
+    test('a saved path whose file is gone names the file', () {
+      expect(
+        missingVideoNote(session(videoPath: '/old/container/transect_2026-10-01T09-00-01-500Z.mov'), null),
+        'No video: transect_2026-10-01T09-00-01-500Z.mov is not on this phone.',
+      );
+    });
   });
 }

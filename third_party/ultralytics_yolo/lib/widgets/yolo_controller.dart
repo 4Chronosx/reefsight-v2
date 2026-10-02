@@ -93,6 +93,16 @@ class YOLOViewController {
     }
   }
 
+  /// [_invoke] without the swallowing, for calls whose failure the caller
+  /// must see (recording).
+  Future<T?> _invokeOrThrow<T>(String method, [Map<String, dynamic>? args]) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      throw StateError('YOLOViewController.$method: camera view not attached yet');
+    }
+    return channel.invokeMethod<T>(method, args);
+  }
+
   Future<void> setConfidenceThreshold(double threshold) async {
     _confidenceThreshold = threshold.clamp(0.0, 1.0);
     await _invoke('setConfidenceThreshold', {
@@ -153,13 +163,18 @@ class YOLOViewController {
   /// mobile/sub-plans/03-crop-classify-and-tracking.md). [path] must be a
   /// writable absolute file path (e.g. under the app's documents
   /// directory); the caller is responsible for resolving it.
+  ///
+  /// Unlike the other calls here, throws on failure instead of logging and
+  /// returning: a recording that silently never started cost whole dives
+  /// of video. Also throws if the platform view isn't attached yet.
   Future<void> startRecording(String path) =>
-      _invoke('startRecording', {'path': path});
+      _invokeOrThrow('startRecording', {'path': path});
 
   /// Stops the current recording, if any. The returned future completes
   /// only once the file has actually finished writing, so it's safe to
   /// read/move the file right after this resolves.
-  Future<void> stopRecording() => _invoke('stopRecording');
+  /// Throws on failure, like [startRecording].
+  Future<void> stopRecording() => _invokeOrThrow('stopRecording');
 
   Future<void> zoomIn() => _invoke('zoomIn');
 

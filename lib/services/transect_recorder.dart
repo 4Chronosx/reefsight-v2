@@ -45,10 +45,16 @@ class TransectRecorder {
   }
 
   /// Stops the current recording. A no-op if nothing is recording.
+  ///
+  /// A failed stop still ends the recording here (the error propagates): the
+  /// native side has nothing more to stop, and retrying would fail again.
   Future<void> stop() async {
     if (!_isRecording) return;
-    await _stopRecording();
-    _isRecording = false;
+    try {
+      await _stopRecording();
+    } finally {
+      _isRecording = false;
+    }
   }
 
   static String _defaultFileName() {

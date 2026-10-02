@@ -28,6 +28,34 @@ Future<File?> resolveTransectVideo(String? storedPath) async {
   return null;
 }
 
+/// The recording path to save at End Transect: [path] only if a non-empty
+/// file is actually there. The native start can report success without
+/// recording (third_party/ultralytics_yolo/PATCH.md), so whether
+/// `startRecording` threw is not enough -- the file is the evidence. `null`
+/// means no video, which Summary explains ([missingVideoNote]).
+Future<String?> recordedVideoPath(String? path) async {
+  if (path == null) return null;
+  final file = File(path);
+  if (!await file.exists()) return null;
+  return await file.length() > 0 ? path : null;
+}
+
+/// Summary's line when [session] has no playable video ([resolved] is
+/// `null`), or `null` when it does. Before this, a failed recording just
+/// hid the video button. A stored path whose file is gone names the file, so
+/// it can be looked for in the Files app (On My iPhone > ReefSight).
+String? missingVideoNote(TransectSession session, File? resolved) {
+  if (resolved != null) return null;
+  final stored = session.videoPath;
+  if (stored != null && stored.isNotEmpty) {
+    return 'No video: ${p.basename(stored)} is not on this phone.';
+  }
+  if (session.endedAt == null) {
+    return "No video: this survey didn't end normally, so its recording wasn't saved.";
+  }
+  return "No video: the camera didn't record a file during this survey.";
+}
+
 /// Sub-plan 16: where a colony sits in its session's transect video.
 class VideoOffset {
   const VideoOffset({

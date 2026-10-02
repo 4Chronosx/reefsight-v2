@@ -51,7 +51,10 @@ untouched/out of scope (project targets iPhone 14 only,
     mirroring the existing `"setZoomLevel"` case.
 - `lib/widgets/yolo_controller.dart`
   - Added `YOLOViewController.startRecording(String path)` /
-    `.stopRecording()`.
+    `.stopRecording()`. Both throw on failure (via `_invokeOrThrow`), unlike the
+    other controller calls, which log and return -- a silently failed start
+    cost whole dives of video (2026-10-03). They also throw if the platform
+    view isn't attached yet.
 - `lib/yolo_view.dart`
   - Added matching passthrough on the `YOLOView` state class.
 
@@ -75,3 +78,16 @@ The landscape video-orientation fix above is also unverified Swift (same
 "Not compiled/run yet" caveat at the top of this file) — confirm on-device
 that `LiveTransectScreen`'s live preview now shows an upright landscape
 feed filling the screen, not a rotated/letterboxed portrait feed.
+
+**Recording can still fail silently on the native side (2026-10-03).**
+`SwiftYOLOPlatformView`'s `"startRecording"` case answers `result(nil)` before
+`VideoCapture.startRecording` has done anything, and that method refuses to
+record unless `captureSession.isRunning` -- which `start()` sets
+asynchronously, after the permission check. A start that loses that race
+logs via `NSLog` only. To fix in Swift (needs Xcode): wait for the session
+to be running before recording, and answer `result` from
+`fileOutput(_:didStartRecordingTo:from:)` or with a `FlutterError`. Also
+check `setUp(sessionPreset: .photo)` in `YOLOView.swift` against
+`AVCaptureMovieFileOutput`: if "Cannot add movie file output" is logged,
+there is no recorder at all. Until then the app keeps a video only if a
+non-empty file exists at End Transect, and Summary says why when it doesn't.

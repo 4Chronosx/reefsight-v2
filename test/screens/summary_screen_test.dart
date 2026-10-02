@@ -142,6 +142,11 @@ void main() {
   // colonies only, so the denominator is shown, not hidden.
   testWidgets('shows "N colonies · M classified · K uncertain"',
       (tester) async {
+    // Tall surface: the header (fixes, notices, video line) pushes this
+    // line below the default 800x600 fold, and ListView builds lazily.
+    tester.view.physicalSize = const Size(800, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final db = await TransectDatabase.openInMemoryForTest();
     addTearDown(db.close);
     final sessionId = await db.insertSession(
@@ -252,6 +257,62 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('Too few classified'), findsNothing);
+    });
+  });
+
+  // A failed recording used to just hide the video button. Summary now says
+  // why there's no video, naming a stored file that's gone.
+  group('missing video note', () {
+    Future<void> pumpSession(WidgetTester tester, TransectSession session) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final id = await db.insertSession(session);
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(
+              sessionId: id,
+              openDatabase: () async => db,
+              resolveVideo: (_) async => null,
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    final start = DateTime.utc(2026, 10, 1, 9);
+
+    testWidgets('ended with no recording saved', (tester) async {
+      await pumpSession(
+        tester,
+        TransectSession(
+          startedAt: start,
+          endedAt: start.add(const Duration(minutes: 30)),
+          tapeLengthMeters: 50,
+        ),
+      );
+
+      expect(find.text("No video: the camera didn't record a file during this survey."), findsOneWidget);
+      expect(find.text('Watch transect video'), findsNothing);
+    });
+
+    testWidgets('a stored file that is gone is named', (tester) async {
+      await pumpSession(
+        tester,
+        TransectSession(
+          startedAt: start,
+          endedAt: start.add(const Duration(minutes: 30)),
+          tapeLengthMeters: 50,
+          videoPath: '/old/transect_2026-10-01T09-00-01-500Z.mov',
+        ),
+      );
+
+      expect(
+        find.text('No video: transect_2026-10-01T09-00-01-500Z.mov is not on this phone.'),
+        findsOneWidget,
+      );
     });
   });
 
