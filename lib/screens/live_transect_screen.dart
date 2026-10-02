@@ -63,6 +63,7 @@ class LiveTransectScreen extends StatefulWidget {
     this.siteName,
     this.observerName,
     this.entryFix,
+    this.resultsHidden = false,
     this.screenAwake = const WakelockScreenAwake(),
     this.storageInfo = const PlatformDeviceInfo(),
     this.batteryInfo = const BatteryPlusInfo(),
@@ -81,6 +82,12 @@ class LiveTransectScreen extends StatefulWidget {
   /// Sub-plan 12: the surface fix Setup took before descent, stored with
   /// the session at insert. `null` if there was none -- never blocks.
   final GeoFix? entryFix;
+
+  /// Sub-plan 14: "Recount planned" at Setup. Stored with the session, and
+  /// hides every app number here -- the tally's counts, the diagnostics
+  /// overlay (it lists health labels) and the End sheet's count. The
+  /// detection overlay stays: the diver needs it to aim the camera.
+  final bool resultsHidden;
 
   /// Keeps the screen from auto-locking for exactly this Live session
   /// (sub-plan 11 step 1). Injectable for tests.
@@ -108,6 +115,11 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   final _healthAggregator = HealthAggregator();
   final _healthHistoryRecorder = HealthHistoryRecorder();
   late final TransectRecorder _recorder;
+
+  /// Video time zero (sub-plan 16): stamped once `_recorder.start` returns,
+  /// written with the video path at finalize. `null` if recording never
+  /// started.
+  DateTime? _videoStartedAt;
 
   // Sub-plan 4 (storage-and-metrics): populated once `_startSession()`
   // resolves the diver-entered tape length and opens the on-device DB.
@@ -259,6 +271,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
           siteName: widget.siteName,
           observerName: widget.observerName,
           entryFix: widget.entryFix,
+          resultsHidden: widget.resultsHidden,
         ),
       );
       _db = db;
@@ -290,6 +303,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     try {
       final documentsDir = await getApplicationDocumentsDirectory();
       await _recorder.start(documentsDir.path);
+      // After the call returns, not before: the native writer starts no
+      // earlier than this, and Summary's 2 s pre-roll absorbs any lag.
+      _videoStartedAt = DateTime.now().toUtc();
     } catch (error) {
       debugPrint('ReefSight: failed to start recording: $error');
       if (mounted) setState(() => _recordingError = error.toString());
@@ -424,6 +440,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
         sessionId,
         DateTime.now().toUtc(),
         videoPath: _recorder.currentOutputPath,
+        videoStartedAt: _videoStartedAt,
       );
     } finally {
       await db.close();
@@ -633,7 +650,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   Future<void> _confirmEndTransect() async {
     final confirmed = await showEndTransectSheet(
       context,
-      colonyCount: _firstSeenAt.length,
+      colonyCount: widget.resultsHidden ? null : _firstSeenAt.length,
     );
     if (!confirmed) return;
     await _endTransect();
@@ -758,6 +775,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
                           HealthAggregator.bleachedLabel)
                       .length,
                   elapsed: elapsed,
+                  showCounts: !widget.resultsHidden,
                 ),
               ),
             ),
@@ -795,7 +813,11 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
             ValueListenableBuilder<bool>(
               valueListenable: AppSettings.instance.showDiagnostics,
               builder: (context, showDiagnostics, _) {
-                if (!showDiagnostics) return const SizedBox.shrink();
+                // Sub-plan 14: suppressed for a "Recount planned" transect,
+                // whatever Settings says -- it lists health labels.
+                if (!showDiagnostics || widget.resultsHidden) {
+                  return const SizedBox.shrink();
+                }
                 return Positioned(
                   left: 12,
                   bottom: 12,

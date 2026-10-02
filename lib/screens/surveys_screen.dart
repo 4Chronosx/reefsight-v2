@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/report_exporter.dart';
 import '../services/session_summary.dart';
 import '../widgets/glove_button.dart';
 import 'summary_screen.dart';
@@ -51,10 +53,47 @@ class _SurveysScreenState extends State<SurveysScreen> {
     }
   }
 
+  bool _exporting = false;
+
+  /// Sub-plan 14 step 6: one CSV row per recounted survey -- the raw table
+  /// behind Phase E's mean absolute error.
+  Future<void> _exportRecountComparisons() async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _exporting = true);
+    try {
+      final sessions = await _load();
+      if (!sessions.any((summary) => summary.session.recount != null)) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('No recounted surveys to export yet.')),
+        );
+        return;
+      }
+      final documentsDir = await getApplicationDocumentsDirectory();
+      final path = await ReportExporter.exportRecountComparisonsCsv(
+        outputDirectory: documentsDir.path,
+        sessions: sessions,
+      );
+      await ReportExporter.shareCsv([path]);
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text('Export failed: $error')));
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Surveys')),
+      appBar: AppBar(
+        title: const Text('Surveys'),
+        actions: [
+          IconButton(
+            tooltip: 'Export recount comparisons',
+            icon: const Icon(Icons.fact_check_outlined),
+            onPressed: _exporting ? null : _exportRecountComparisons,
+          ),
+        ],
+      ),
       body: FutureBuilder<List<SessionSummary>>(
         future: _sessions,
         builder: (context, snapshot) {
@@ -167,24 +206,32 @@ class _SurveyCard extends StatelessWidget {
                 style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
               ),
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Text('${summary.colonyCount} colonies', style: const TextStyle(fontSize: 13)),
-                  const SizedBox(width: 12),
-                  if (bleachingPct != null)
-                    Expanded(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: LinearProgressIndicator(
-                          value: bleachingPct,
-                          backgroundColor: AppColors.healthy.withValues(alpha: 0.15),
-                          valueColor: const AlwaysStoppedAnimation(AppColors.bleached),
-                          minHeight: 8,
+              // Sub-plan 14: no app numbers for a "Recount planned" survey
+              // until its results are revealed.
+              if (session.resultsCurrentlyHidden)
+                Text(
+                  'Results hidden — recount pending',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                )
+              else
+                Row(
+                  children: [
+                    Text('${summary.colonyCount} colonies', style: const TextStyle(fontSize: 13)),
+                    const SizedBox(width: 12),
+                    if (bleachingPct != null)
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: bleachingPct,
+                            backgroundColor: AppColors.healthy.withValues(alpha: 0.15),
+                            valueColor: const AlwaysStoppedAnimation(AppColors.bleached),
+                            minHeight: 8,
+                          ),
                         ),
                       ),
-                    ),
-                ],
-              ),
+                  ],
+                ),
             ],
           ),
         ),

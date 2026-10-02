@@ -4,6 +4,9 @@ import 'package:csv/csv.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'geo_fix.dart';
+import 'recount_comparison.dart';
+import 'report_data.dart';
+import 'session_summary.dart';
 import 'tracked_colony_record.dart';
 import 'transect_session.dart';
 
@@ -111,7 +114,78 @@ class ReportExporter {
     'Exit At',
     'Exit Source',
     'Entry-Exit Distance (m)',
+    ..._recountHeaders,
   ];
+
+  /// Sub-plan 14 step 6: the recount, the app's counts, and the comparison
+  /// -- appended to the session CSV and repeated in Surveys' comparisons
+  /// export. Percentages have two decimals; a missing value is an empty
+  /// cell. App prevalence is over classified colonies, the recount's over
+  /// all counted colonies (see `RecountComparison`).
+  static const List<String> _recountHeaders = [
+    'Results Hidden',
+    'Recount Total',
+    'Recount Bleached',
+    'Recount By',
+    'Recount At',
+    'Recount Blinded',
+    'App Total',
+    'App Bleached',
+    'App Classified',
+    'Count Error',
+    'Count Error (%)',
+    'App Prevalence (%)',
+    'Recount Prevalence (%)',
+    'Prevalence Diff (pp)',
+  ];
+
+  /// Sub-plan 14 step 6: Surveys' "Export recount comparisons" -- one row
+  /// per recounted session, the raw table behind Phase E's MAE.
+  static const List<String> recountComparisonsCsvHeaders = [
+    'Site',
+    'Observer',
+    'Started At',
+    'Tape Length (m)',
+    ..._recountHeaders,
+  ];
+
+  static String _fixed(double? value) => value?.toStringAsFixed(2) ?? '';
+
+  /// The [_recountHeaders] cells. The app's counts are `null` when the
+  /// caller doesn't have them, leaving those and the comparison empty.
+  static List<dynamic> _recountCells(
+    TransectSession session, {
+    int? appTotal,
+    int? appBleached,
+    int? appClassified,
+  }) {
+    final recount = session.recount;
+    final comparison =
+        recount == null || appTotal == null || appBleached == null || appClassified == null
+            ? null
+            : RecountComparison(
+                appTotal: appTotal,
+                appBleached: appBleached,
+                appClassified: appClassified,
+                recount: recount,
+              );
+    return [
+      session.resultsHidden,
+      recount?.total ?? '',
+      recount?.bleached ?? '',
+      recount?.countedBy ?? '',
+      recount?.at.toIso8601String() ?? '',
+      recount?.blinded ?? '',
+      appTotal ?? '',
+      appBleached ?? '',
+      appClassified ?? '',
+      comparison?.countError ?? '',
+      _fixed(comparison?.countErrorPercent),
+      _fixed(comparison?.appPrevalencePercent),
+      _fixed(comparison?.recountPrevalencePercent),
+      _fixed(comparison?.prevalenceDiffPp),
+    ];
+  }
 
   static List<dynamic> _fixCells(GeoFix? fix) => [
         fix?.lat ?? '',
@@ -125,12 +199,19 @@ class ReportExporter {
   /// row and one data row with the session identity and both GPS fixes
   /// (with source and accuracy). Kept separate so the colony CSV's columns
   /// stay unchanged.
+  ///
+  /// Sub-plan 14: also the recount and, given the session's [colonies],
+  /// the app's counts and the comparison.
   static Future<String> exportSessionCsv({
     required String outputDirectory,
     required TransectSession session,
+    List<TrackedColonyRecord>? colonies,
   }) {
     final entry = session.entryFix;
     final exit = session.exitFix;
+    final report = colonies == null
+        ? null
+        : TransectReport(session: session, colonies: colonies);
     return _write(outputDirectory, '${_baseName(session)}_session.csv', [
       sessionCsvHeaders,
       [
@@ -143,7 +224,44 @@ class ReportExporter {
         ..._fixCells(entry),
         ..._fixCells(exit),
         entry != null && exit != null ? distanceMeters(entry, exit).toStringAsFixed(1) : '',
+        ..._recountCells(
+          session,
+          appTotal: report?.totalColonies,
+          appBleached: report?.bleachedCount,
+          appClassified: report?.classifiedCount,
+        ),
       ],
+    ]);
+  }
+
+  /// Sub-plan 14 step 6: every session in [sessions] that has a recount,
+  /// one row each -- `reefsight_recount_comparisons_<time>.csv`.
+  /// [exportedAt] names the file (default now, UTC).
+  static Future<String> exportRecountComparisonsCsv({
+    required String outputDirectory,
+    required List<SessionSummary> sessions,
+    DateTime? exportedAt,
+  }) {
+    final stamp = (exportedAt ?? DateTime.now()).toUtc().toIso8601String()
+        .replaceAll(':', '-')
+        .replaceAll('.', '-')
+        .substring(0, 19);
+    return _write(outputDirectory, 'reefsight_recount_comparisons_$stamp.csv', [
+      recountComparisonsCsvHeaders,
+      for (final summary in sessions)
+        if (summary.session.recount != null)
+          [
+            summary.session.siteName ?? '',
+            summary.session.observerName ?? '',
+            summary.session.startedAt.toIso8601String(),
+            summary.session.tapeLengthMeters,
+            ..._recountCells(
+              summary.session,
+              appTotal: summary.colonyCount,
+              appBleached: summary.bleachedCount,
+              appClassified: summary.classifiedCount,
+            ),
+          ],
     ]);
   }
 

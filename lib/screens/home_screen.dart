@@ -257,12 +257,19 @@ class _RecentSurveyCard extends StatelessWidget {
           session.startedAt.toLocal().toString().substring(0, 16),
           style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
         ),
-        trailing: bleachingPct == null
-            ? const HealthChip(healthLabel: null)
-            : Text(
-                '$bleachingPct% bleached',
-                style: const TextStyle(color: AppColors.bleached, fontSize: 12),
-              ),
+        // Sub-plan 14: no app numbers for a "Recount planned" survey until
+        // its results are revealed.
+        trailing: session.resultsCurrentlyHidden
+            ? Text(
+                'Results hidden',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              )
+            : bleachingPct == null
+                ? const HealthChip(healthLabel: null)
+                : Text(
+                    '$bleachingPct% bleached',
+                    style: const TextStyle(color: AppColors.bleached, fontSize: 12),
+                  ),
       ),
     );
   }

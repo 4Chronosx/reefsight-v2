@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/home_screen.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
+import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -72,6 +73,50 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.byType(SummaryScreen), findsOneWidget);
+  });
+
+  // Sub-plan 14: a "Recount planned" survey shows no app numbers anywhere
+  // until its results are revealed -- not just on Summary.
+  testWidgets('a hidden-results survey shows no bleaching figure', (tester) async {
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    Future<void> seed(String site, {required bool hidden, required int day}) async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, day),
+          tapeLengthMeters: 50,
+          siteName: site,
+          resultsHidden: hidden,
+        ),
+      );
+      for (final (trackId, label) in [(1, 'CORAL'), (2, 'CORAL_BL')]) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: trackId,
+            healthLabel: label,
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, day),
+            lastSeenAt: DateTime.utc(2026, 1, day),
+          ),
+        );
+      }
+    }
+
+    await seed('Shown Site', hidden: false, day: 1);
+    await seed('Hidden Site', hidden: true, day: 2);
+
+    await tester.pumpWidget(
+      _wrap(HomeScreen(
+        dataRevision: 0,
+        onSeeAllSurveys: () {},
+        openDatabase: () async => db,
+      )),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('50% bleached'), findsOneWidget, reason: 'the shown survey only');
+    expect(find.text('Results hidden'), findsOneWidget);
   });
 
   testWidgets('"See all" invokes onSeeAllSurveys', (tester) async {

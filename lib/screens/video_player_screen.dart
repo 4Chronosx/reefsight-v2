@@ -4,17 +4,35 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../services/report_exporter.dart';
+import '../services/transect_video.dart';
 
 /// In-app playback of a transect's continuous recording
 /// (`TransectRecorder` -> `TransectSession.videoPath`). Before this, the
 /// only way to reach a recording was the "Share Transect Video" button at
 /// the bottom of Summary's Technical tab -- there was nowhere to simply
 /// watch it. Share stays available from the app bar here.
+///
+/// Sub-plan 16: Summary's colony rows open it at [startAt] -- just before
+/// that colony first appears -- with [note] saying when that position is
+/// only an estimate.
 class VideoPlayerScreen extends StatefulWidget {
-  const VideoPlayerScreen({super.key, required this.file, this.title});
+  const VideoPlayerScreen({
+    super.key,
+    required this.file,
+    this.title,
+    this.startAt,
+    this.note,
+  });
 
   final File file;
   final String? title;
+
+  /// Where playback starts; clamped to the file's duration. `null` plays
+  /// from the beginning.
+  final Duration? startAt;
+
+  /// A line shown under the video, e.g. that [startAt] is approximate.
+  final String? note;
 
   @override
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
@@ -23,8 +41,15 @@ class VideoPlayerScreen extends StatefulWidget {
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   late final VideoPlayerController _controller =
       VideoPlayerController.file(widget.file);
-  late final Future<void> _initFuture = _controller.initialize().then((_) {
-    _controller.play();
+  late final Future<void> _initFuture = _controller.initialize().then((_) async {
+    final startAt = widget.startAt;
+    if (startAt != null && startAt > Duration.zero) {
+      // Not the exact end: play() at position == duration restarts from 0.
+      var last = _controller.value.duration - const Duration(seconds: 1);
+      if (last.isNegative) last = Duration.zero;
+      await _controller.seekTo(startAt > last ? last : startAt);
+    }
+    await _controller.play();
   });
 
   @override
@@ -78,6 +103,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                     ),
                   ),
                 ),
+                if (widget.note case final note?)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: Text(
+                      note,
+                      style: TextStyle(color: Colors.amber.shade200, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
                 VideoProgressIndicator(
                   _controller,
                   allowScrubbing: true,
@@ -103,7 +137,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          '${_format(value.position)} / ${_format(value.duration)}',
+                          '${formatVideoTime(value.position)} / '
+                          '${formatVideoTime(value.duration)}',
                           style: const TextStyle(color: Colors.white),
                         ),
                       ],
@@ -116,11 +151,5 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
         ),
       ),
     );
-  }
-
-  static String _format(Duration d) {
-    final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return d.inHours > 0 ? '${d.inHours}:$minutes:$seconds' : '$minutes:$seconds';
   }
 }

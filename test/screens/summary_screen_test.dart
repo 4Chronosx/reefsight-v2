@@ -5,8 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/app_shell.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
+import 'package:reefsight_mobile/screens/video_player_screen.dart';
 import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
+import 'package:reefsight_mobile/services/health_aggregator.dart';
+import 'package:reefsight_mobile/services/recount.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -471,6 +474,335 @@ void main() {
       expect(find.textContaining('ended over 12 h ago'), findsOneWidget);
       expect(find.text('Enter manually'), findsOneWidget);
       expect(location.calls, 0);
+    });
+  });
+
+  // Sub-plan 14: blinded manual recount. File-backed for the same reason as
+  // the exit-fix group: saving opens one handle to write, another to reload.
+  group('Manual recount (sub-plan 14)', () {
+    late Directory dir;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('reefsight_summary_recount_');
+    });
+
+    tearDown(() async {
+      await dir.delete(recursive: true);
+    });
+
+    Future<T> withDb<T>(WidgetTester tester, Future<T> Function(TransectDatabase) body) async {
+      final result = await tester.runAsync(() async {
+        final db = await TransectDatabase.open(dir.path);
+        try {
+          return await body(db);
+        } finally {
+          await db.close();
+        }
+      });
+      return result as T;
+    }
+
+    /// Three colonies: one healthy, one bleached, one Uncertain -- so app
+    /// prevalence is 1 of 2 classified (50 %).
+    Future<int> seed(
+      WidgetTester tester, {
+      required bool resultsHidden,
+      bool ended = true,
+    }) =>
+        withDb(tester, (db) async {
+          final start = DateTime.now().toUtc().subtract(const Duration(hours: 1));
+          final id = await db.insertSession(
+            TransectSession(
+              startedAt: start,
+              endedAt: ended ? start.add(const Duration(minutes: 40)) : null,
+              tapeLengthMeters: 50,
+              siteName: 'Day-as',
+              resultsHidden: resultsHidden,
+            ),
+          );
+          final labels = [HealthAggregator.healthyLabel, HealthAggregator.bleachedLabel, null];
+          for (var i = 0; i < labels.length; i++) {
+            await db.upsertColony(
+              TrackedColonyRecord(
+                sessionId: id,
+                trackId: i + 1,
+                healthLabel: labels[i],
+                healthHistory: const [],
+                firstSeenAt: start,
+                lastSeenAt: start,
+              ),
+            );
+          }
+          return id;
+        });
+
+    Future<void> pumpSummary(WidgetTester tester, int sessionId) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(
+              sessionId: sessionId,
+              openDatabase: () => TransectDatabase.open(dir.path),
+              locationProvider: FakeLocationProvider.fix(),
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    /// Taps [button] and polls real time (bounded) until [until] renders --
+    /// a save writes, closes, then reloads through real file-backed opens.
+    Future<void> tapAndWait(WidgetTester tester, Finder button, Finder until) async {
+      await tester.runAsync(() async {
+        await tester.tap(button);
+        for (var i = 0; i < 50 && until.evaluate().isEmpty; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          await tester.pump();
+        }
+      });
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> fillRecount(WidgetTester tester, String total, String bleached, String by) async {
+      await tester.enterText(find.byKey(const ValueKey('recount-total')), total);
+      await tester.enterText(find.byKey(const ValueKey('recount-bleached')), bleached);
+      await tester.enterText(find.byKey(const ValueKey('recount-by')), by);
+      await tester.pump();
+    }
+
+    Future<Recount?> storedRecount(WidgetTester tester, int id) =>
+        withDb(tester, (db) async => (await db.sessionById(id))!.recount);
+
+    void expectNoAppNumbers() {
+      expect(find.byType(TabBar), findsNothing);
+      expect(find.textContaining('Density'), findsNothing);
+      expect(find.textContaining('classified'), findsNothing);
+      expect(find.textContaining('prevalence'), findsNothing);
+      expect(find.textContaining('colonies were saved'), findsNothing);
+      expect(find.textContaining('Track #'), findsNothing);
+    }
+
+    testWidgets('hidden mode shows the header and the recount form, no numbers',
+        (tester) async {
+      final sessionId = await seed(tester, resultsHidden: true);
+
+      await pumpSummary(tester, sessionId);
+
+      expect(find.text('Day-as'), findsOneWidget);
+      expect(find.text("The app's results are hidden until the recount is entered."),
+          findsOneWidget);
+      expect(find.byKey(const ValueKey('recount-total')), findsOneWidget);
+      expect(find.text('Reveal without recount'), findsOneWidget);
+      expectNoAppNumbers();
+    });
+
+    testWidgets('an incomplete hidden session says so without a colony count',
+        (tester) async {
+      final sessionId = await seed(tester, resultsHidden: true, ended: false);
+
+      await pumpSummary(tester, sessionId);
+
+      expect(find.text('Incomplete.'), findsOneWidget);
+      expectNoAppNumbers();
+    });
+
+    testWidgets('bleached above total is rejected before saving', (tester) async {
+      final sessionId = await seed(tester, resultsHidden: true);
+      await pumpSummary(tester, sessionId);
+
+      await fillRecount(tester, '3', '4', 'B. Counter');
+
+      expect(find.text("Bleached can't be more than the total."), findsOneWidget);
+      expect(
+        tester.widget<ElevatedButton>(find.widgetWithText(ElevatedButton, 'Save recount')).onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('a recount saved while hidden is blind and reveals the report',
+        (tester) async {
+      final sessionId = await seed(tester, resultsHidden: true);
+      await pumpSummary(tester, sessionId);
+
+      await fillRecount(tester, '4', '1', 'B. Counter');
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Save recount'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining("can't be changed"), findsOneWidget);
+      await tapAndWait(tester, find.text('Confirm'), find.byType(TabBar));
+
+      expect(find.byType(TabBar), findsOneWidget);
+      expect(find.text('Reveal without recount'), findsNothing);
+      final recount = (await storedRecount(tester, sessionId))!;
+      expect(recount.blinded, isTrue);
+      expect(recount.total, 4);
+      expect(recount.countedBy, 'B. Counter');
+
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Manual recount (blind)'), findsOneWidget);
+      expect(find.text('Add recount'), findsNothing);
+    });
+
+    testWidgets('"Reveal without recount" makes a later recount unblinded', (tester) async {
+      final sessionId = await seed(tester, resultsHidden: true);
+      await pumpSummary(tester, sessionId);
+
+      await tester.tap(find.text('Reveal without recount'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not blind'), findsOneWidget);
+      await tapAndWait(tester, find.text('Reveal'), find.byType(TabBar));
+      expect(find.byType(TabBar), findsOneWidget);
+
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add recount'));
+      await tester.pumpAndSettle();
+      await fillRecount(tester, '4', '1', 'B. Counter');
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Save recount'));
+      await tester.pumpAndSettle();
+      final comparison = find.byKey(const ValueKey('recount-comparison'));
+      await tapAndWait(tester, find.text('Confirm'), comparison);
+
+      expect((await storedRecount(tester, sessionId))!.blinded, isFalse);
+    });
+
+    testWidgets('the comparison is correct and names both denominators', (tester) async {
+      final sessionId = await seed(tester, resultsHidden: false);
+      await withDb(
+        tester,
+        (db) => db.recordRecount(sessionId,
+            total: 4, bleached: 1, countedBy: 'B. Counter', at: DateTime.utc(2026, 10, 2, 3)),
+      );
+      await pumpSummary(tester, sessionId);
+
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Manual recount (not blind)'), findsOneWidget);
+      // App 3 vs recount 4.
+      expect(find.text('Colonies: app 3 · recount 4 · error -1 (-25.0%)'), findsOneWidget);
+      // App 1/2 classified = 50 %, recount 1/4 = 25 %.
+      expect(
+        find.text('Bleaching prevalence: app 50.0% · recount 25.0% · difference +25.0 pp'),
+        findsOneWidget,
+      );
+      expect(
+        find.text("App prevalence is over the 2 classified colonies (Uncertain left out); "
+            "the recount's is over all 4 counted colonies."),
+        findsOneWidget,
+      );
+    });
+  });
+
+  // Sub-plan 16: a colony row on the Technical tab opens the transect video
+  // just before that colony first appears.
+  group('colony video jump', () {
+    final videoStart = DateTime.utc(2026, 10, 1, 9, 0, 1);
+
+    Future<int> seed(TransectDatabase db, {DateTime? videoStartedAt}) async {
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 10, 1, 9),
+          tapeLengthMeters: 50,
+          videoPath: '/docs/clip.mov',
+          videoStartedAt: videoStartedAt,
+        ),
+      );
+      await db.upsertColony(
+        TrackedColonyRecord(
+          sessionId: sessionId,
+          trackId: 12,
+          healthHistory: const [],
+          firstSeenAt: videoStart.add(const Duration(minutes: 3, seconds: 41)),
+          lastSeenAt: videoStart.add(const Duration(minutes: 3, seconds: 52)),
+        ),
+      );
+      return sessionId;
+    }
+
+    Future<void> openTechnicalTab(
+      WidgetTester tester,
+      TransectDatabase db,
+      int sessionId, {
+      File? video,
+    }) async {
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(
+              sessionId: sessionId,
+              openDatabase: () async => db,
+              resolveVideo: (_) async => video,
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      // The colony list is below the fold of the tab's lazy ListView.
+      await tester.scrollUntilVisible(
+        find.text('Track #12'),
+        300,
+        scrollable: find
+            .byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down)
+            .last,
+      );
+    }
+
+    final playButton = find.byTooltip('Watch in video');
+
+    testWidgets('no video, no play button on the colony rows', (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(db, videoStartedAt: videoStart);
+
+      await openTechnicalTab(tester, db, sessionId);
+
+      expect(find.text('Track #12'), findsOneWidget);
+      expect(playButton, findsNothing);
+    });
+
+    testWidgets('opens the player 2 s before the first sighting, titled with the window',
+        (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(db, videoStartedAt: videoStart);
+
+      await openTechnicalTab(tester, db, sessionId, video: File('/docs/clip.mov'));
+      await tester.ensureVisible(playButton);
+      await tester.tap(playButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final player = tester.widget<VideoPlayerScreen>(find.byType(VideoPlayerScreen));
+      expect(player.startAt, const Duration(minutes: 3, seconds: 39));
+      expect(player.title, 'Colony #12 · 03:41–03:52');
+      expect(player.note, isNull);
+    });
+
+    testWidgets('an older session without the video start time is marked approximate',
+        (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await seed(db);
+
+      await openTechnicalTab(tester, db, sessionId, video: File('/docs/clip.mov'));
+      await tester.ensureVisible(playButton);
+      await tester.tap(playButton);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final player = tester.widget<VideoPlayerScreen>(find.byType(VideoPlayerScreen));
+      // No stored start and no timestamp in the file name: zero is startedAt.
+      expect(player.startAt, const Duration(minutes: 3, seconds: 40));
+      expect(player.note, 'Position approximate (recorded before video timing was stored)');
     });
   });
 }

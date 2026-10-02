@@ -34,8 +34,10 @@ class TransectDatabase {
   /// `no such column: ...`. 3 -> 4 added the checkpoint/interruption
   /// columns (sub-plan 11: live session safety). 4 -> 5 added the thermal
   /// peak and rise count (sub-plan 13: pre-dive checks). 5 -> 6 added the
-  /// entry/exit GPS fix columns (sub-plan 12).
-  static const _schemaVersion = 6;
+  /// entry/exit GPS fix columns (sub-plan 12). 6 -> 7 added the hidden-
+  /// results and manual recount columns (sub-plan 14). 7 -> 8 added
+  /// `video_started_at` (sub-plan 16: colony video jump).
+  static const _schemaVersion = 8;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -88,6 +90,7 @@ class TransectDatabase {
         site_name TEXT,
         observer_name TEXT,
         video_path TEXT,
+        video_started_at TEXT,
         last_checkpoint_at TEXT,
         interruption_count INTEGER,
         first_interrupted_at TEXT,
@@ -95,7 +98,8 @@ class TransectDatabase {
         thermal_peak TEXT,
         thermal_rise_count INTEGER,
         ${_fixColumnsSql('entry')},
-        ${_fixColumnsSql('exit')}
+        ${_fixColumnsSql('exit')},
+        ${_recountColumns.join(',\n        ')}
       )
     ''');
     await db.execute('''
@@ -120,7 +124,9 @@ class TransectDatabase {
   /// order -- 1 -> 2 added `site_name`/`observer_name`, 2 -> 3 added
   /// `video_path`, 3 -> 4 added the checkpoint/interruption columns, 4 -> 5
   /// added `thermal_peak`/`thermal_rise_count`, 5 -> 6 added the
-  /// `entry_*`/`exit_*` GPS fix columns.
+  /// `entry_*`/`exit_*` GPS fix columns, 6 -> 7 added `results_hidden`,
+  /// `results_revealed_at` and the `recount_*` columns, 7 -> 8 added
+  /// `video_started_at`.
   /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
   /// read back as `null`, matching `TransectSession.fromMap`'s
   /// already-nullable handling of every added column).
@@ -153,7 +159,27 @@ class TransectDatabase {
         }
       }
     }
+    if (oldVersion < 7) {
+      for (final column in _recountColumns) {
+        await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN $column');
+      }
+    }
+    if (oldVersion < 8) {
+      await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN video_started_at TEXT');
+    }
   }
+
+  /// Sub-plan 14's columns -- names match `TransectSession.toMap` and
+  /// `Recount.toColumns`. Flags are 0/1, times ISO-8601 UTC.
+  static const _recountColumns = [
+    'results_hidden INTEGER',
+    'results_revealed_at TEXT',
+    'recount_total INTEGER',
+    'recount_bleached INTEGER',
+    'recount_by TEXT',
+    'recount_at TEXT',
+    'recount_blinded INTEGER',
+  ];
 
   /// Sub-plan 12's five columns per GPS fix -- names match
   /// `GeoFix.toColumns`. `<prefix>_at` is ISO-8601 UTC, `<prefix>_source`
@@ -175,10 +201,17 @@ class TransectDatabase {
 
   /// [videoPath] is optional -- omitted (or `null`) leaves the column
   /// untouched rather than overwriting a previously-set path with `null`,
-  /// matching every existing caller/test that doesn't pass it.
-  Future<void> closeSession(int sessionId, DateTime endedAt, {String? videoPath}) async {
+  /// matching every existing caller/test that doesn't pass it. Same for
+  /// [videoStartedAt] (sub-plan 16).
+  Future<void> closeSession(
+    int sessionId,
+    DateTime endedAt, {
+    String? videoPath,
+    DateTime? videoStartedAt,
+  }) async {
     final values = {'ended_at': endedAt.toIso8601String()};
     if (videoPath != null) values['video_path'] = videoPath;
+    if (videoStartedAt != null) values['video_started_at'] = videoStartedAt.toUtc().toIso8601String();
     await _db.update(
       _sessionsTable,
       values,
@@ -284,6 +317,59 @@ class TransectDatabase {
     return changed == 1;
   }
 
+  /// Stores the manual recount -- sub-plan 14 decision 3. Write-once, like
+  /// [recordExitFix]: the `recount_at IS NULL` guard is in the same UPDATE.
+  ///
+  /// `recount_blinded` is decided here in SQL from the row itself, never by
+  /// the caller: it's 1 only if results were hidden at Setup and never
+  /// revealed before this write, so a stale screen can't mislabel an
+  /// unblinded recount as blind. A hidden session's results are revealed by
+  /// the same write (SQLite evaluates every SET against the old row, so the
+  /// CASE sees the pre-write `results_revealed_at`). Returns whether this
+  /// call stored the recount.
+  Future<bool> recordRecount(
+    int sessionId, {
+    required int total,
+    required int bleached,
+    required String countedBy,
+    required DateTime at,
+  }) async {
+    final by = countedBy.trim();
+    if (total < 0 || bleached < 0 || bleached > total) {
+      throw ArgumentError('Need 0 <= bleached ($bleached) <= total ($total)');
+    }
+    if (by.isEmpty) throw ArgumentError('countedBy is required');
+    final stamp = at.toUtc().toIso8601String();
+    final changed = await _db.rawUpdate('''
+      UPDATE $_sessionsTable
+      SET recount_total = ?,
+          recount_bleached = ?,
+          recount_by = ?,
+          recount_at = ?,
+          recount_blinded = CASE
+            WHEN results_hidden = 1 AND results_revealed_at IS NULL THEN 1 ELSE 0 END,
+          results_revealed_at = CASE
+            WHEN results_hidden = 1 THEN COALESCE(results_revealed_at, ?)
+            ELSE results_revealed_at END
+      WHERE id = ? AND recount_at IS NULL
+    ''', [total, bleached, by, stamp, stamp, sessionId]);
+    return changed == 1;
+  }
+
+  /// "Reveal without recount" -- sub-plan 14 step 4. Write-once; any recount
+  /// entered after this is stored unblinded. `results_hidden` stays 1, so
+  /// the record keeps that a recount was planned. Returns whether this call
+  /// revealed anything.
+  Future<bool> revealResults(int sessionId, DateTime at) async {
+    final changed = await _db.update(
+      _sessionsTable,
+      {'results_revealed_at': at.toUtc().toIso8601String()},
+      where: 'id = ? AND results_hidden = 1 AND results_revealed_at IS NULL',
+      whereArgs: [sessionId],
+    );
+    return changed == 1;
+  }
+
   Future<List<TrackedColonyRecord>> colonyRowsForSession(
     int sessionId,
   ) async {
@@ -308,7 +394,8 @@ class TransectDatabase {
     final rows = await _db.rawQuery('''
       SELECT s.*,
              COUNT(c.id) AS colony_count,
-             SUM(CASE WHEN c.health_label = ? THEN 1 ELSE 0 END) AS bleached_count
+             SUM(CASE WHEN c.health_label = ? THEN 1 ELSE 0 END) AS bleached_count,
+             COUNT(c.health_label) AS classified_count
       FROM $_sessionsTable s
       LEFT JOIN $_coloniesTable c ON c.session_id = s.id
       GROUP BY s.id
@@ -321,6 +408,7 @@ class TransectDatabase {
             session: TransectSession.fromMap(row),
             colonyCount: (row['colony_count'] as num?)?.toInt() ?? 0,
             bleachedCount: (row['bleached_count'] as num?)?.toInt() ?? 0,
+            classifiedCount: (row['classified_count'] as num?)?.toInt() ?? 0,
           ),
         )
         .toList(growable: false);

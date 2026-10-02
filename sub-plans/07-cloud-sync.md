@@ -129,14 +129,24 @@ created on one phone and never edited after `ended_at`. Sync is therefore **appe
 read-only download**, never two-way merging. Uploading the same session twice is a no-op (idempotent on
 its UUID). This removes the hardest part of offline-first sync.
 
-**The one exception: the exit GPS fix (sub-plan 12, decision 3).** The exit fix is recorded from Summary
-after surfacing, so it can land after End Transect, and after this survey has already been uploaded.
-It's the only field ever written to a session after `ended_at`, and it's write-once: the five `exit_*`
-columns go from null to a value exactly once (`TransectDatabase.recordExitFix` guards with
-`exit_lat IS NULL` in the same UPDATE) and are never changed after that. So sync needs exactly one
-later update: if the uploaded copy has no exit fix and the local one does, send those five columns.
-The Worker should accept that update only while its own `exit_lat` is null, which keeps it write-once
-and idempotent. Every other column stays immutable once uploaded.
+**The exceptions: the exit GPS fix (sub-plan 12, decision 3) and the manual recount (sub-plan 14).**
+The exit fix is recorded from Summary after surfacing, so it can land after End Transect, and after this
+survey has already been uploaded. It's write-once: the five `exit_*` columns go from null to a value
+exactly once (`TransectDatabase.recordExitFix` guards with `exit_lat IS NULL` in the same UPDATE) and
+are never changed after that. So sync needs one later update: if the uploaded copy has no exit fix and
+the local one does, send those five columns. The Worker should accept that update only while its own
+`exit_lat` is null, which keeps it write-once and idempotent.
+
+*Added 2026-10-02 (sub-plan 14):* the same holds for two more write-once groups, each set at most once
+after End Transect:
+- `results_revealed_at`, set by "Reveal without recount" (`revealResults`, guarded by
+  `results_revealed_at IS NULL`) or by saving a recount on a hidden session.
+- the five `recount_*` columns (`recordRecount`, guarded by `recount_at IS NULL`).
+  `recount_blinded` is computed by that UPDATE from the row itself.
+
+Sync sends each group when the uploaded copy has it null and the local copy doesn't, and the Worker
+accepts it only under the same null guard. `results_hidden` is set at insert, like every other Setup
+field. Every other column stays immutable once uploaded.
 
 **D. There's no delete, locally or in the cloud.** This follows sub-plan 6's decision 8: surveys are
 irreversible field data. The Worker exposes no delete endpoint. Only the account owner can clean up

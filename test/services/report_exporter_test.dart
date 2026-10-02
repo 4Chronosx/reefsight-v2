@@ -4,7 +4,9 @@ import 'package:csv/csv.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
+import 'package:reefsight_mobile/services/recount.dart';
 import 'package:reefsight_mobile/services/report_exporter.dart';
+import 'package:reefsight_mobile/services/session_summary.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -233,6 +235,138 @@ void main() {
       ]) {
         expect(row[column], '', reason: column);
       }
+    });
+  });
+
+  // Sub-plan 14 step 6: the recount and its comparison, in the session CSV
+  // and in Surveys' one-row-per-recounted-session export.
+  group('Recount comparison export', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('report_exporter_recount_test');
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    });
+
+    Future<List<List<dynamic>>> readRows(String path) async =>
+        const CsvToListConverter(shouldParseNumbers: false)
+            .convert(await File(path).readAsString());
+
+    Map<String, String> asMap(List<dynamic> headers, List<dynamic> row) =>
+        Map.fromIterables(headers.map((h) => '$h'), row.map((cell) => '$cell'));
+
+    // App: 3 colonies, 2 classified, 1 bleached (50 %).
+    final appColonies = [
+      colony(trackId: 1, healthLabel: 'CORAL'),
+      colony(trackId: 2, healthLabel: 'CORAL_BL'),
+      colony(trackId: 3),
+    ];
+
+    TransectSession session({Recount? recount, bool hidden = true}) => TransectSession(
+          startedAt: DateTime.utc(2026, 10, 2, 1, 5),
+          tapeLengthMeters: 50,
+          siteName: 'Day-as',
+          observerName: 'Observer A',
+          resultsHidden: hidden,
+          resultsRevealedAt: recount?.at,
+          recount: recount,
+        );
+
+    // Recount: 4 colonies, 1 bleached (25 %).
+    final recount = Recount(
+      total: 4,
+      bleached: 1,
+      countedBy: 'B. Counter',
+      at: DateTime.utc(2026, 10, 2, 3),
+      blinded: true,
+    );
+
+    void expectComparison(Map<String, String> row) {
+      expect(row['Results Hidden'], 'true');
+      expect(row['Recount Total'], '4');
+      expect(row['Recount Bleached'], '1');
+      expect(row['Recount By'], 'B. Counter');
+      expect(row['Recount At'], '2026-10-02T03:00:00.000Z');
+      expect(row['Recount Blinded'], 'true');
+      expect(row['App Total'], '3');
+      expect(row['App Bleached'], '1');
+      expect(row['App Classified'], '2');
+      expect(row['Count Error'], '-1');
+      expect(row['Count Error (%)'], '-25.00');
+      expect(row['App Prevalence (%)'], '50.00');
+      expect(row['Recount Prevalence (%)'], '25.00');
+      expect(row['Prevalence Diff (pp)'], '25.00');
+    }
+
+    test('the session CSV carries the recount and the comparison', () async {
+      final path = await ReportExporter.exportSessionCsv(
+        outputDirectory: tempDir.path,
+        session: session(recount: recount),
+        colonies: appColonies,
+      );
+
+      final rows = await readRows(path);
+      expect(rows.first, ReportExporter.sessionCsvHeaders);
+      expectComparison(asMap(rows.first, rows[1]));
+    });
+
+    test('with no recount, the recount and comparison cells are empty', () async {
+      final path = await ReportExporter.exportSessionCsv(
+        outputDirectory: tempDir.path,
+        session: session(hidden: false),
+        colonies: appColonies,
+      );
+
+      final rows = await readRows(path);
+      final row = asMap(rows.first, rows[1]);
+      expect(row['Results Hidden'], 'false');
+      expect(row['App Total'], '3');
+      for (final column in [
+        'Recount Total',
+        'Recount Blinded',
+        'Count Error',
+        'Count Error (%)',
+        'Prevalence Diff (pp)',
+      ]) {
+        expect(row[column], '', reason: column);
+      }
+    });
+
+    test('Surveys export writes one row per recounted session', () async {
+      final path = await ReportExporter.exportRecountComparisonsCsv(
+        outputDirectory: tempDir.path,
+        sessions: [
+          SessionSummary(
+            session: session(recount: recount),
+            colonyCount: 3,
+            bleachedCount: 1,
+            classifiedCount: 2,
+          ),
+          SessionSummary(
+            session: session(hidden: false),
+            colonyCount: 5,
+            bleachedCount: 0,
+            classifiedCount: 5,
+          ),
+        ],
+        exportedAt: DateTime.utc(2026, 10, 2, 4, 30),
+      );
+
+      expect(
+        path.split(RegExp(r'[\\/]')).last,
+        'reefsight_recount_comparisons_2026-10-02T04-30-00.csv',
+      );
+      final rows = await readRows(path);
+      expect(rows, hasLength(2), reason: 'header plus the one recounted session');
+      expect(rows.first, ReportExporter.recountComparisonsCsvHeaders);
+      final row = asMap(rows.first, rows[1]);
+      expect(row['Site'], 'Day-as');
+      expect(row['Started At'], '2026-10-02T01:05:00.000Z');
+      expect(row['Tape Length (m)'], '50.0');
+      expectComparison(row);
     });
   });
 }

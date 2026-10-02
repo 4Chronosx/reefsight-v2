@@ -9,9 +9,15 @@ class SessionSummary {
     required this.session,
     required this.colonyCount,
     required this.bleachedCount,
+    required this.classifiedCount,
   });
 
   final TransectSession session;
   final int colonyCount;
   final int bleachedCount;
+
+  /// Colonies with a confident health label -- the app's prevalence
+  /// denominator (sub-plan 10), needed by the recount comparisons export
+  /// (sub-plan 14).
+  final int classifiedCount;
 }

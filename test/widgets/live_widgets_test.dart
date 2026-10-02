@@ -47,6 +47,49 @@ void main() {
     expect(find.text('2'), findsOneWidget);
   });
 
+  // Sub-plan 14 step 3: with "Recount planned", the diver sees time only.
+  testWidgets('TallyHud with showCounts off shows elapsed time and no counts',
+      (tester) async {
+    await tester.pumpWidget(
+      _wrapLandscape(
+        tester,
+        const TallyHud(
+          seenCount: 5,
+          healthyCount: 3,
+          bleachedCount: 2,
+          elapsed: Duration(minutes: 2, seconds: 5),
+          showCounts: false,
+        ),
+      ),
+    );
+
+    expect(find.text('02:05'), findsOneWidget);
+    for (final hidden in ['5', '3', '2', 'Seen ', 'Healthy ', 'Bleached ']) {
+      expect(find.text(hidden), findsNothing, reason: hidden);
+    }
+  });
+
+  testWidgets('end-transect sheet with no count asks without a number',
+      (tester) async {
+    await tester.pumpWidget(
+      _wrapLandscape(
+        tester,
+        Builder(
+          builder: (context) => ElevatedButton(
+            onPressed: () => showEndTransectSheet(context, colonyCount: null),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('End transect?'), findsOneWidget);
+    expect(find.textContaining('recorded'), findsNothing);
+  });
+
   testWidgets('RecordingIndicator shows REC + elapsed when recording, no error',
       (tester) async {
     await tester.pumpWidget(

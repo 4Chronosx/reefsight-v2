@@ -387,4 +387,38 @@ void main() {
       expect(tester.widget<TextButton>(saveButton()).onPressed, isNotNull);
     });
   });
+
+  // Sub-plan 14 decision 1: blinding is chosen per transect, at Setup.
+  group('Recount planned', () {
+    final recountSwitch = find.byKey(const ValueKey('recount-planned'));
+
+    testWidgets('is off by default, so results are shown', (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      TransectStart? started;
+      await _pumpSetup(tester, db, onStart: (_, start) => started = start);
+
+      expect(tester.widget<SwitchListTile>(recountSwitch).value, isFalse);
+      await tester.tap(_startButton());
+      await tester.pump();
+
+      expect(started!.resultsHidden, isFalse);
+    });
+
+    testWidgets('switched on, Start hands Live resultsHidden', (tester) async {
+      _useTallSurface(tester);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      TransectStart? started;
+      await _pumpSetup(tester, db, onStart: (_, start) => started = start);
+
+      await tester.tap(recountSwitch);
+      await tester.pump();
+      await tester.tap(_startButton());
+      await tester.pump();
+
+      expect(started!.resultsHidden, isTrue);
+    });
+  });
 }

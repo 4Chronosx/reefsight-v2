@@ -23,11 +23,16 @@ class TransectStart {
     this.siteName,
     this.observerName,
     this.entryFix,
+    this.resultsHidden = false,
   });
 
   final double tapeLengthMeters;
   final String? siteName;
   final String? observerName;
+
+  /// Sub-plan 14: "Recount planned" -- hide the app's numbers on this phone
+  /// until the manual recount is entered.
+  final bool resultsHidden;
 
   /// The entry fix as of the Start tap, or `null`. A fix still being
   /// acquired at that moment is dropped, not written later.
@@ -45,6 +50,7 @@ void pushLiveTransect(BuildContext context, TransectStart start) {
         siteName: start.siteName,
         observerName: start.observerName,
         entryFix: start.entryFix,
+        resultsHidden: start.resultsHidden,
       ),
     ),
   );
@@ -97,6 +103,10 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
   final _observerController = TextEditingController();
   late final DeviceHealthMonitor _deviceHealth;
   late final GeoFixController _entryFix;
+
+  /// Sub-plan 14 decision 1. Never prefilled from the last session: each
+  /// transect's blinding is a fresh, deliberate choice.
+  bool _recountPlanned = false;
 
   @override
   void initState() {
@@ -179,6 +189,7 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
             ? null
             : _observerController.text.trim(),
         entryFix: _entryFix.value.fix,
+        resultsHidden: _recountPlanned,
       ),
     );
   }
@@ -249,6 +260,20 @@ class _TransectSetupScreenState extends State<TransectSetupScreen> {
                     controller: _observerController,
                     textCapitalization: TextCapitalization.words,
                     decoration: const InputDecoration(labelText: 'Observer name (optional)'),
+                  ),
+                  const SizedBox(height: 4),
+                  // Sub-plan 14: the manual recount must not see the app's
+                  // output first, so hide it on this phone until then.
+                  SwitchListTile(
+                    key: const ValueKey('recount-planned'),
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Recount planned'),
+                    subtitle: const Text(
+                      "Hide the app's results until the manual recount is entered.",
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: _recountPlanned,
+                    onChanged: (value) => setState(() => _recountPlanned = value),
                   ),
                 ],
               ),

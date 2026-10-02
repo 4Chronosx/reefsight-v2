@@ -17,12 +17,18 @@ class TallyHud extends StatelessWidget {
     required this.healthyCount,
     required this.bleachedCount,
     required this.elapsed,
+    this.showCounts = true,
   });
 
   final int seenCount;
   final int healthyCount;
   final int bleachedCount;
   final Duration elapsed;
+
+  /// `false` for a "Recount planned" transect (sub-plan 14 step 3): the
+  /// diver doing or briefing the recount must not see the app's counts, so
+  /// only the elapsed time shows.
+  final bool showCounts;
 
   @override
   Widget build(BuildContext context) {
@@ -47,12 +53,14 @@ class TallyHud extends StatelessWidget {
               fontWeight: FontWeight.bold,
             ),
           ),
-          const SizedBox(width: 16),
-          _Count(label: 'Seen', value: seenCount, color: Colors.white),
-          const SizedBox(width: 12),
-          _Count(label: 'Healthy', value: healthyCount, color: AppColors.healthy),
-          const SizedBox(width: 12),
-          _Count(label: 'Bleached', value: bleachedCount, color: AppColors.bleached),
+          if (showCounts) ...[
+            const SizedBox(width: 16),
+            _Count(label: 'Seen', value: seenCount, color: Colors.white),
+            const SizedBox(width: 12),
+            _Count(label: 'Healthy', value: healthyCount, color: AppColors.healthy),
+            const SizedBox(width: 12),
+            _Count(label: 'Bleached', value: bleachedCount, color: AppColors.bleached),
+          ],
         ],
       ),
     );

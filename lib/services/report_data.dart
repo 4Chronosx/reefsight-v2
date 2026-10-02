@@ -1,4 +1,5 @@
 import 'health_aggregator.dart';
+import 'recount_comparison.dart';
 import 'tracked_colony_record.dart';
 import 'transect_metrics.dart';
 import 'transect_session.dart';
@@ -37,6 +38,19 @@ class TransectReport {
   int get classifiedCount => totalColonies - uncertainCount;
 
   double? get bleachingPrevalenceFraction => bleachingPrevalence(colonies);
+
+  /// Sub-plan 14: this report against the session's manual recount, or
+  /// `null` if none has been entered.
+  RecountComparison? get recountComparison {
+    final recount = session.recount;
+    if (recount == null) return null;
+    return RecountComparison(
+      appTotal: totalColonies,
+      appBleached: bleachedCount,
+      appClassified: classifiedCount,
+      recount: recount,
+    );
+  }
 
   double get densityPerSquareMeter => density(
         colonyCount: totalColonies,

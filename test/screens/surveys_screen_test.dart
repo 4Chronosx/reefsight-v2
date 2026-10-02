@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/surveys_screen.dart';
+import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -89,5 +92,85 @@ void main() {
 
     final summary = tester.widget<SummaryScreen>(find.byType(SummaryScreen));
     expect(summary.sessionId, newerInProgressId);
+  });
+
+  // Sub-plan 14: a "Recount planned" survey's card shows no app numbers
+  // until its results are revealed.
+  testWidgets('a hidden-results survey card shows no count or bleaching bar',
+      (tester) async {
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    Future<void> seed(String site, {required bool hidden, required int colonies}) async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, colonies),
+          tapeLengthMeters: 50,
+          siteName: site,
+          resultsHidden: hidden,
+        ),
+      );
+      for (var i = 0; i < colonies; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: i + 1,
+            healthLabel: 'CORAL_BL',
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+          ),
+        );
+      }
+    }
+
+    await seed('Shown Site', hidden: false, colonies: 2);
+    await seed('Hidden Site', hidden: true, colonies: 3);
+
+    await tester.pumpWidget(
+      _wrap(SurveysScreen(dataRevision: 0, openDatabase: () async => db)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 colonies'), findsOneWidget);
+    expect(find.text('3 colonies'), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    expect(find.text('Results hidden — recount pending'), findsOneWidget);
+  });
+
+  // File-backed, not in-memory: the export re-reads the list through a new
+  // handle, and Surveys closes every handle it opens.
+  testWidgets('exporting recount comparisons with none recounted says so',
+      (tester) async {
+    final dir = Directory.systemTemp.createTempSync('reefsight_surveys_export_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final message = find.text('No recounted surveys to export yet.');
+
+    await tester.runAsync(() async {
+      final db = await TransectDatabase.open(dir.path);
+      await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+      );
+      await db.close();
+
+      await tester.pumpWidget(
+        _wrap(SurveysScreen(
+          dataRevision: 0,
+          openDatabase: () => TransectDatabase.open(dir.path),
+        )),
+      );
+      for (var i = 0; i < 50 && find.byType(Card).evaluate().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+      }
+
+      await tester.tap(find.byTooltip('Export recount comparisons'));
+      for (var i = 0; i < 50 && message.evaluate().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+      }
+    });
+    await tester.pumpAndSettle();
+
+    expect(message, findsOneWidget);
   });
 }

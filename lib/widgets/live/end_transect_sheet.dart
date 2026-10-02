@@ -10,9 +10,12 @@ import '../glove_button.dart';
 /// both paths to ending a transect go through the same confirmation and the
 /// same downstream `_endTransect()` -- this function only decides whether
 /// to proceed, never touches session state itself (sub-plan decision 5).
+///
+/// [colonyCount] is `null` for a "Recount planned" transect (sub-plan 14),
+/// so the sheet asks without showing the app's count.
 Future<bool> showEndTransectSheet(
   BuildContext context, {
-  required int colonyCount,
+  required int? colonyCount,
 }) async {
   final result = await showModalBottomSheet<bool>(
     context: context,
@@ -24,8 +27,10 @@ Future<bool> showEndTransectSheet(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'End transect? $colonyCount '
-              '${colonyCount == 1 ? 'colony' : 'colonies'} recorded.',
+              colonyCount == null
+                  ? 'End transect?'
+                  : 'End transect? $colonyCount '
+                      '${colonyCount == 1 ? 'colony' : 'colonies'} recorded.',
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),

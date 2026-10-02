@@ -101,5 +101,22 @@ void main() {
       expect(restored.siteName, 'Marigondon Reef');
       expect(restored.observerName, 'C. Zaballa');
     });
+
+    // Sub-plan 16: the recording's own start time, video zero for seeking
+    // to a colony.
+    test('videoStartedAt defaults to null and round-trips through the map', () {
+      final without = TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 10);
+      expect(without.videoStartedAt, isNull);
+      expect(TransectSession.fromMap(without.toMap()).videoStartedAt, isNull);
+
+      final videoStart = DateTime.utc(2026, 1, 1, 0, 0, 3, 250);
+      final withVideo = TransectSession(
+        startedAt: DateTime.utc(2026, 1, 1),
+        tapeLengthMeters: 10,
+        videoStartedAt: videoStart,
+      );
+      expect(TransectSession.fromMap(withVideo.toMap()).videoStartedAt, videoStart);
+      expect(without.copyWith(videoStartedAt: videoStart).videoStartedAt, videoStart);
+    });
   });
 }

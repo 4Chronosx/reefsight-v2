@@ -75,3 +75,31 @@ Nullable on `transect_sessions`:
 ## Done when
 - A transect run with "Recount planned" hides every app number on the phone until the recount is entered.
 - The comparison shows on Summary and appears in both exports, ready for ml-03 step 5's table.
+
+## Implementation notes (2026-10-02)
+Implemented as written, except for the points below. Rationale: `../../docs/blinded-recount-entry.md`.
+- **Schema v7**, because sub-plan 12 had already used v6. It adds the six listed columns plus one more,
+  **`results_revealed_at`** (ISO-8601 UTC). "Reveal without recount" needs a stored state: without it,
+  reopening the survey would hide the results again, and setting `results_hidden` back to 0 would lose
+  the fact that a recount was planned. Results are hidden while
+  `results_hidden = 1 AND results_revealed_at IS NULL` (`TransectSession.resultsCurrentlyHidden`).
+- **`recount_blinded` is computed in SQL**, in `TransectDatabase.recordRecount`'s single write-once
+  UPDATE, from the row itself. The UI never passes it in. The same UPDATE reveals a hidden session.
+  `revealResults` is write-once too.
+- **Four more places that showed results are hidden.** None of them was named in the steps above:
+  - Summary's incomplete-session notice (it now says "Incomplete." with no colony count)
+  - the End Transect sheet's colony count
+  - Home's "N% bleached"
+  - the Surveys card's count and bleaching bar
+- "Counted by" is required. Summary keeps the previous report on screen while it reloads, so saving a
+  recount from the Technical tab doesn't jump back to the Executive tab.
+- The session CSV gets 14 recount/app/comparison columns, filled from the colonies Summary passes in.
+  The comparisons CSV is `reefsight_recount_comparisons_<UTC time>.csv`.
+- Paper trail: a note in sub-plan 07 (the new write-once groups and sync), and a note under the Spec's
+  blinding item, which stays **[OPEN]** until the field team decides.
+- **Verified:** `dart analyze`: no issues; `flutter test`: 360 passed.
+- **Still open:**
+  - A device check: run a hidden transect from Setup to Summary, recount, export, and confirm the
+    recording has no burned-in overlay.
+  - `LiveTransectScreen`'s gating (tally, diagnostics, End sheet) is only covered through the widgets it
+    passes values to, not on the screen itself, which can't run headlessly.

@@ -1,5 +1,6 @@
 import 'device_checks.dart';
 import 'geo_fix.dart';
+import 'recount.dart';
 
 /// One transect run: identity plus the physical tape length that serves as
 /// the density denominator.
@@ -22,6 +23,7 @@ class TransectSession {
     this.siteName,
     this.observerName,
     this.videoPath,
+    this.videoStartedAt,
     this.lastCheckpointAt,
     this.interruptionCount,
     this.firstInterruptedAt,
@@ -30,6 +32,9 @@ class TransectSession {
     this.thermalRiseCount,
     this.entryFix,
     this.exitFix,
+    this.resultsHidden = false,
+    this.resultsRevealedAt,
+    this.recount,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -57,6 +62,14 @@ class TransectSession {
   /// recording never started or the session never finalized (e.g. app
   /// killed mid-dive).
   final String? videoPath;
+
+  /// When the recording started -- stamped once `TransectRecorder.start`
+  /// returns, so it is video time zero, unlike [startedAt] (which precedes
+  /// the DB open and insert). Sub-plan 16 maps a colony's `firstSeenAt` to a
+  /// video position with it (`videoOffsetFor`). Written with [videoPath] at
+  /// finalize; `null` if recording never started, and on every session
+  /// recorded before schema v8.
+  final DateTime? videoStartedAt;
 
   /// When `SessionCheckpointer` last wrote this session's colony rows during
   /// Live (sub-plan 11). For an incomplete session (`endedAt == null`) this
@@ -87,6 +100,23 @@ class TransectSession {
   final GeoFix? entryFix;
   final GeoFix? exitFix;
 
+  /// Sub-plan 14 decision 1: "Recount planned" was switched on at Setup, so
+  /// Live and Summary hide the app's numbers until the recount is entered.
+  /// Stays `true` after the reveal, so the record keeps that a recount was
+  /// planned. `false` for every session before schema v7.
+  final bool resultsHidden;
+
+  /// When a hidden session's results were first shown on this phone: on
+  /// saving the recount, or on "Reveal without recount". Write-once
+  /// (`TransectDatabase.revealResults`/`recordRecount`).
+  final DateTime? resultsRevealedAt;
+
+  /// The manual recount, write-once (`TransectDatabase.recordRecount`).
+  final Recount? recount;
+
+  /// Whether the app's numbers must stay off screen right now.
+  bool get resultsCurrentlyHidden => resultsHidden && resultsRevealedAt == null;
+
   TransectSession copyWith({
     int? id,
     DateTime? startedAt,
@@ -96,6 +126,7 @@ class TransectSession {
     String? siteName,
     String? observerName,
     String? videoPath,
+    DateTime? videoStartedAt,
     DateTime? lastCheckpointAt,
     int? interruptionCount,
     DateTime? firstInterruptedAt,
@@ -104,6 +135,9 @@ class TransectSession {
     int? thermalRiseCount,
     GeoFix? entryFix,
     GeoFix? exitFix,
+    bool? resultsHidden,
+    DateTime? resultsRevealedAt,
+    Recount? recount,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -114,6 +148,7 @@ class TransectSession {
       siteName: siteName ?? this.siteName,
       observerName: observerName ?? this.observerName,
       videoPath: videoPath ?? this.videoPath,
+      videoStartedAt: videoStartedAt ?? this.videoStartedAt,
       lastCheckpointAt: lastCheckpointAt ?? this.lastCheckpointAt,
       interruptionCount: interruptionCount ?? this.interruptionCount,
       firstInterruptedAt: firstInterruptedAt ?? this.firstInterruptedAt,
@@ -122,6 +157,9 @@ class TransectSession {
       thermalRiseCount: thermalRiseCount ?? this.thermalRiseCount,
       entryFix: entryFix ?? this.entryFix,
       exitFix: exitFix ?? this.exitFix,
+      resultsHidden: resultsHidden ?? this.resultsHidden,
+      resultsRevealedAt: resultsRevealedAt ?? this.resultsRevealedAt,
+      recount: recount ?? this.recount,
     );
   }
 
@@ -136,6 +174,7 @@ class TransectSession {
         'site_name': siteName,
         'observer_name': observerName,
         'video_path': videoPath,
+        'video_started_at': videoStartedAt?.toIso8601String(),
         'last_checkpoint_at': lastCheckpointAt?.toIso8601String(),
         'interruption_count': interruptionCount,
         'first_interrupted_at': firstInterruptedAt?.toIso8601String(),
@@ -144,6 +183,9 @@ class TransectSession {
         'thermal_rise_count': thermalRiseCount,
         ...entryFix?.toColumns('entry') ?? GeoFix.nullColumns('entry'),
         ...exitFix?.toColumns('exit') ?? GeoFix.nullColumns('exit'),
+        'results_hidden': resultsHidden ? 1 : 0,
+        'results_revealed_at': resultsRevealedAt?.toIso8601String(),
+        ...Recount.toColumns(recount),
       };
 
   static DateTime? _parseNullable(Object? raw) =>
@@ -160,6 +202,7 @@ class TransectSession {
       siteName: map['site_name'] as String?,
       observerName: map['observer_name'] as String?,
       videoPath: map['video_path'] as String?,
+      videoStartedAt: _parseNullable(map['video_started_at']),
       lastCheckpointAt: _parseNullable(map['last_checkpoint_at']),
       interruptionCount: map['interruption_count'] as int?,
       firstInterruptedAt: _parseNullable(map['first_interrupted_at']),
@@ -168,6 +211,9 @@ class TransectSession {
       thermalRiseCount: map['thermal_rise_count'] as int?,
       entryFix: GeoFix.fromColumns(map, 'entry'),
       exitFix: GeoFix.fromColumns(map, 'exit'),
+      resultsHidden: map['results_hidden'] == 1,
+      resultsRevealedAt: _parseNullable(map['results_revealed_at']),
+      recount: Recount.fromColumns(map),
     );
   }
 }

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
+import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:sqflite/sqflite.dart' show openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
@@ -606,6 +607,305 @@ void main() {
       final summary = (await db.listSessions()).single;
       expect(summary.session.entryFix, entry);
       expect(summary.session.exitFix, exit);
+    });
+  });
+
+  group('TransectDatabase schema v7', () {
+    Future<int> insert(TransectDatabase db, {bool resultsHidden = false}) => db.insertSession(
+          TransectSession(
+            startedAt: DateTime.utc(2026, 10, 2, 1),
+            tapeLengthMeters: 50,
+            resultsHidden: resultsHidden,
+          ),
+        );
+
+    test('upgrading a v6 file keeps existing rows; recount columns read back unset',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v6_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v6 sessions table exactly as `_createSchema` wrote it before v7.
+      final v6 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 6,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT,
+              last_checkpoint_at TEXT,
+              interruption_count INTEGER,
+              first_interrupted_at TEXT,
+              last_interrupted_at TEXT,
+              thermal_peak TEXT,
+              thermal_rise_count INTEGER,
+              entry_lat REAL, entry_lon REAL, entry_accuracy_m REAL,
+              entry_at TEXT, entry_source TEXT,
+              exit_lat REAL, exit_lon REAL, exit_accuracy_m REAL,
+              exit_at TEXT, exit_source TEXT
+            )
+          ''');
+        },
+      );
+      final sessionId = await v6.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'site_name': 'Day-as',
+        'entry_lat': 10.25,
+        'entry_lon': 123.95,
+        'entry_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'entry_source': 'gps',
+      });
+      await v6.close();
+
+      final db = await TransectDatabase.open(dir.path);
+      addTearDown(db.close);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.siteName, 'Day-as');
+      expect(stored.entryFix, isNotNull);
+      expect(stored.resultsHidden, isFalse);
+      expect(stored.resultsRevealedAt, isNull);
+      expect(stored.recount, isNull);
+      expect(stored.resultsCurrentlyHidden, isFalse);
+
+      // An old survey's recount can only be unblinded: it was never hidden.
+      expect(
+        await db.recordRecount(sessionId,
+            total: 10, bleached: 2, countedBy: 'A. Diver', at: DateTime.utc(2026, 1, 2)),
+        isTrue,
+      );
+      expect((await db.sessionById(sessionId))!.recount!.blinded, isFalse);
+    });
+
+    test('results_hidden round-trips and hides results until revealed', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final hiddenId = await insert(db, resultsHidden: true);
+      final shownId = await insert(db);
+
+      final hidden = await db.sessionById(hiddenId);
+      expect(hidden!.resultsHidden, isTrue);
+      expect(hidden.resultsCurrentlyHidden, isTrue);
+      expect((await db.sessionById(shownId))!.resultsCurrentlyHidden, isFalse);
+    });
+
+    test('a recount entered while hidden is stored blinded and reveals results', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db, resultsHidden: true);
+      final at = DateTime.utc(2026, 10, 2, 3);
+
+      expect(
+        await db.recordRecount(sessionId,
+            total: 12, bleached: 3, countedBy: 'B. Counter', at: at),
+        isTrue,
+      );
+
+      final stored = (await db.sessionById(sessionId))!;
+      final recount = stored.recount!;
+      expect(recount.total, 12);
+      expect(recount.bleached, 3);
+      expect(recount.countedBy, 'B. Counter');
+      expect(recount.at, at);
+      expect(recount.blinded, isTrue);
+      expect(stored.resultsRevealedAt, at);
+      expect(stored.resultsCurrentlyHidden, isFalse);
+    });
+
+    test('recordRecount writes once; a second write changes nothing', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db, resultsHidden: true);
+
+      expect(
+        await db.recordRecount(sessionId,
+            total: 12, bleached: 3, countedBy: 'B', at: DateTime.utc(2026, 10, 2, 3)),
+        isTrue,
+      );
+      expect(
+        await db.recordRecount(sessionId,
+            total: 99, bleached: 0, countedBy: 'C', at: DateTime.utc(2026, 10, 2, 4)),
+        isFalse,
+      );
+
+      final recount = (await db.sessionById(sessionId))!.recount!;
+      expect(recount.total, 12);
+      expect(recount.countedBy, 'B');
+    });
+
+    test('revealing without a recount makes a later recount unblinded', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db, resultsHidden: true);
+      final revealedAt = DateTime.utc(2026, 10, 2, 3);
+
+      expect(await db.revealResults(sessionId, revealedAt), isTrue);
+      // Write-once: a second reveal keeps the first time.
+      expect(await db.revealResults(sessionId, DateTime.utc(2026, 10, 3)), isFalse);
+
+      var stored = (await db.sessionById(sessionId))!;
+      expect(stored.resultsHidden, isTrue, reason: 'the plan to recount stays on record');
+      expect(stored.resultsRevealedAt, revealedAt);
+      expect(stored.resultsCurrentlyHidden, isFalse);
+
+      await db.recordRecount(sessionId,
+          total: 5, bleached: 1, countedBy: 'B', at: DateTime.utc(2026, 10, 2, 5));
+      stored = (await db.sessionById(sessionId))!;
+      expect(stored.recount!.blinded, isFalse);
+      // The recount doesn't move the earlier reveal time.
+      expect(stored.resultsRevealedAt, revealedAt);
+    });
+
+    test('a recount on a session that was never hidden is unblinded', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db);
+
+      await db.recordRecount(sessionId,
+          total: 5, bleached: 1, countedBy: 'B', at: DateTime.utc(2026, 10, 2, 5));
+      expect((await db.sessionById(sessionId))!.recount!.blinded, isFalse);
+    });
+
+    test('recordRecount rejects impossible counts and a blank counter', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db, resultsHidden: true);
+      final at = DateTime.utc(2026, 10, 2, 5);
+
+      expect(
+        () => db.recordRecount(sessionId, total: 3, bleached: 4, countedBy: 'B', at: at),
+        throwsArgumentError,
+      );
+      expect(
+        () => db.recordRecount(sessionId, total: -1, bleached: 0, countedBy: 'B', at: at),
+        throwsArgumentError,
+      );
+      expect(
+        () => db.recordRecount(sessionId, total: 3, bleached: 1, countedBy: '  ', at: at),
+        throwsArgumentError,
+      );
+      expect((await db.sessionById(sessionId))!.recount, isNull);
+    });
+
+    test('listSessions counts classified colonies and carries the recount', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await insert(db, resultsHidden: true);
+      final seen = DateTime.utc(2026, 10, 2, 1, 10);
+      for (final (trackId, label) in [
+        (1, HealthAggregator.healthyLabel),
+        (2, HealthAggregator.bleachedLabel),
+        (3, null),
+      ]) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: trackId,
+            healthLabel: label,
+            healthHistory: const [],
+            firstSeenAt: seen,
+            lastSeenAt: seen,
+          ),
+        );
+      }
+      await db.recordRecount(sessionId,
+          total: 4, bleached: 1, countedBy: 'B', at: DateTime.utc(2026, 10, 2, 5));
+
+      final summary = (await db.listSessions()).single;
+      expect(summary.colonyCount, 3);
+      expect(summary.bleachedCount, 1);
+      expect(summary.classifiedCount, 2);
+      expect(summary.session.recount!.total, 4);
+    });
+  });
+
+  group('TransectDatabase schema v8', () {
+    test('upgrading a v7 file keeps existing rows; videoStartedAt reads back null', () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v7_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v7 sessions table exactly as `_createSchema` wrote it before v8.
+      final v7 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 7,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT,
+              last_checkpoint_at TEXT,
+              interruption_count INTEGER,
+              first_interrupted_at TEXT,
+              last_interrupted_at TEXT,
+              thermal_peak TEXT,
+              thermal_rise_count INTEGER,
+              entry_lat REAL, entry_lon REAL, entry_accuracy_m REAL,
+              entry_at TEXT, entry_source TEXT,
+              exit_lat REAL, exit_lon REAL, exit_accuracy_m REAL,
+              exit_at TEXT, exit_source TEXT,
+              results_hidden INTEGER,
+              results_revealed_at TEXT,
+              recount_total INTEGER,
+              recount_bleached INTEGER,
+              recount_by TEXT,
+              recount_at TEXT,
+              recount_blinded INTEGER
+            )
+          ''');
+        },
+      );
+      final sessionId = await v7.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'site_name': 'Day-as',
+        'video_path': '/old/transect_2026-01-01T00-00-02-000Z.mov',
+      });
+      await v7.close();
+
+      final db = await TransectDatabase.open(dir.path);
+      addTearDown(db.close);
+
+      final stored = await db.sessionById(sessionId);
+      expect(stored!.siteName, 'Day-as');
+      expect(stored.videoPath, '/old/transect_2026-01-01T00-00-02-000Z.mov');
+      expect(stored.videoStartedAt, isNull);
+    });
+
+    test('closeSession stores videoStartedAt; omitting it leaves the column alone', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final id = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 10, 2, 1), tapeLengthMeters: 50),
+      );
+      final videoStart = DateTime.utc(2026, 10, 2, 1, 0, 2, 400);
+
+      await db.closeSession(
+        id,
+        DateTime.utc(2026, 10, 2, 1, 30),
+        videoPath: '/docs/transect.mov',
+        videoStartedAt: videoStart,
+      );
+      expect((await db.sessionById(id))!.videoStartedAt, videoStart);
+
+      await db.closeSession(id, DateTime.utc(2026, 10, 2, 1, 31));
+      expect((await db.sessionById(id))!.videoStartedAt, videoStart);
     });
   });
 }
