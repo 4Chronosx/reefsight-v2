@@ -25,6 +25,27 @@ sentence and density (`summary_screen.dart` `_ExecutiveTab`). For the LGU and th
    suitable source is settled, the tab shows the number and its interval with **no** severity word. That's
    less friendly, but not invented.
 
+### Step 0 — settled (2026-10-03)
+1. **Audience: both** the Municipal Environment and Natural Resources Office and the MPA management boards
+   (Gilutongan, Alegria). Plain language, **no management actions** in the tab.
+2. **Severity scale: Hughes et al. (2017), using only the paper's own words.** Hughes, T. P., Kerry, J. T.,
+   Álvarez-Noriega, M., et al. (2017). Global warming and recurrent mass bleaching of corals. *Nature*,
+   543(7645), 373–377. https://doi.org/10.1038/nature21707. Checked against the author-accepted manuscript
+   (White Rose eprint 123989):
+   - Methods, "Aerial surveys": *"Each reef was assigned by visual assessment to one of five categories of
+     bleaching severity … (0) less than 1% of corals bleached, (1) 1-10%, (2) 10-30%, (3) 30-60%, and (4)
+     more than 60% of corals bleached."* Extended Data Fig. 5 restates these as "% of colonies bleached".
+   - The paper names only two severity words: **"severe"**, *"defined as an aerial score of >30% of corals
+     bleached"* (main text), and **"extreme"**, *">60% of corals bleached"* (main text). It doesn't use
+     "low" or "moderate", so the tab doesn't either.
+   - **The rule:** show "severe" only when the **whole 95% Wilson interval is above 30%** (`interval.low >
+     0.30`), and "extreme" only when it's above 60%. The estimate must also be reliable (sub-plan 17's
+     `minClassifiedForPrevalence`). Otherwise show no severity word. Name the source in the sentence: the
+     scale was designed for whole reefs scored from the air, not a single transect.
+   - **Known mismatches**, to note in the `docs/` explainer: (a) a reef-scale aerial scale is being applied
+     to one belt transect; (b) Hughes' underwater counts treat pale colonies as bleached (categories 2–5),
+     while our classifier only says bleached or healthy.
+
 ## Content (top to bottom)
 1. **One status sentence**, plain language, built from the data. For example: "34 coral colonies were
    surveyed along a 50 m transect at Gilutongan on 5 Oct. About 18% of those the app could assess were

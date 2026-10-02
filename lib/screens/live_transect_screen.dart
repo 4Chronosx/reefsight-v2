@@ -313,9 +313,25 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     await _startRecording();
   }
 
+  /// After the camera view attaches, how long the native session gets to
+  /// start running before recording is requested. A guess, checked on the
+  /// device: a `transect_*.mov` in Files means it was long enough.
+  static const _cameraSettle = Duration(milliseconds: 1500);
+
   Future<void> _startRecording() async {
     try {
+      // The camera's platform view attaches after the first frame, so a
+      // start sent straight away never reached it (no transect ever had a
+      // video). Wait for it, then give the native session a moment to start
+      // running: the native start refuses until it is, and only logs it
+      // (third_party/ultralytics_yolo/PATCH.md).
+      final attached = await waitUntil(() => _yoloController.isInitialized || _disposed);
+      if (_disposed) return;
+      if (!attached) throw StateError('Camera view did not attach within 10 s');
+      await Future<void>.delayed(_cameraSettle);
+      if (_disposed) return;
       final documentsDir = await getApplicationDocumentsDirectory();
+      if (_disposed) return;
       await _recorder.start(documentsDir.path);
       // After the call returns, not before: the native writer starts no
       // earlier than this, and Summary's 2 s pre-roll absorbs any lag.
@@ -563,6 +579,17 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     _checkpointer?.handleLifecycle(state);
     if (state == AppLifecycleState.resumed && !_finalized && !_disposed) {
       _screenAwake.acquire();
+    }
+    // iOS stops the camera in the background and the recording isn't
+    // restarted, so replace the REC timer with when it stopped. The first
+    // issue stays: a later one is less useful than when video ran out.
+    if (_recordingError == null && !_finalized && !_disposed) {
+      final interrupted = recordingInterruptedMessage(
+        state,
+        recording: _recorder.isRecording,
+        elapsed: DateTime.now().difference(_liveStartedAt),
+      );
+      if (interrupted != null) setState(() => _recordingError = interrupted);
     }
   }
 

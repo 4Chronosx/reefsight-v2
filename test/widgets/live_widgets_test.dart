@@ -117,6 +117,9 @@ void main() {
 
     expect(find.text('Recording issue'), findsOneWidget);
     expect(find.text('REC 00:00'), findsNothing);
+    // The reason, readable on the device -- there's no Xcode console in the
+    // field to find it in.
+    expect(find.text('disk full'), findsOneWidget);
   });
 
   testWidgets('LiveErrorBanner shows the message and expands detail on tap',

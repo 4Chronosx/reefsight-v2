@@ -6,6 +6,7 @@ import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
+import 'package:reefsight_mobile/services/session_summary.dart';
 import 'package:sqflite/sqflite.dart' show Database, openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
@@ -272,6 +273,114 @@ void main() {
           summaries.firstWhere((s) => s.session.id == inProgressId);
 
       expect(inProgress.session.endedAt, isNull);
+    });
+  });
+
+  // Sub-plan 19 step 2: the Executive tab's "compared with the last survey
+  // of this site".
+  group('TransectDatabase.previousSessionForSite', () {
+    late TransectDatabase db;
+
+    setUp(() async {
+      db = await TransectDatabase.openInMemoryForTest();
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    Future<int> insertSession(
+      DateTime startedAt, {
+      String? site = 'Gilutongan',
+      bool ended = true,
+      bool resultsHidden = false,
+    }) async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: startedAt,
+          tapeLengthMeters: 50,
+          siteName: site,
+          resultsHidden: resultsHidden,
+        ),
+      );
+      if (ended) await db.closeSession(id, startedAt.add(const Duration(hours: 1)));
+      return id;
+    }
+
+    Future<SessionSummary?> previousFor(int id, DateTime startedAt, {String? site = 'Gilutongan'}) =>
+        db.previousSessionForSite(site, before: startedAt, excludingId: id);
+
+    test('picks the newest earlier session at the same site, with its counts', () async {
+      await insertSession(DateTime.utc(2026, 9, 1));
+      final sep12 = await insertSession(DateTime.utc(2026, 9, 12));
+      await db.upsertColony(
+        TrackedColonyRecord(
+          sessionId: sep12,
+          trackId: 1,
+          healthLabel: HealthAggregator.bleachedLabel,
+          healthHistory: const [],
+          firstSeenAt: DateTime.utc(2026, 9, 12),
+          lastSeenAt: DateTime.utc(2026, 9, 12),
+        ),
+      );
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final current = await insertSession(oct5);
+      await insertSession(DateTime.utc(2026, 10, 20)); // later: never "previous"
+
+      final previous = await previousFor(current, oct5);
+
+      expect(previous?.session.id, sep12);
+      expect(previous?.bleachedCount, 1);
+      expect(previous?.classifiedCount, 1);
+    });
+
+    test('matches the site name trimmed and case-insensitively', () async {
+      final earlier = await insertSession(DateTime.utc(2026, 9, 12), site: '  gilutongan ');
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final current = await insertSession(oct5, site: 'GILUTONGAN');
+
+      final previous = await previousFor(current, oct5, site: 'GILUTONGAN');
+
+      expect(previous?.session.id, earlier);
+    });
+
+    test('ignores other sites', () async {
+      await insertSession(DateTime.utc(2026, 9, 12), site: 'Alegria');
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final current = await insertSession(oct5);
+
+      expect(await previousFor(current, oct5), isNull);
+    });
+
+    test('skips incomplete sessions and ones whose results are still hidden', () async {
+      final revealed = await insertSession(DateTime.utc(2026, 9, 1), resultsHidden: true);
+      await db.revealResults(revealed, DateTime.utc(2026, 9, 1, 2));
+      await insertSession(DateTime.utc(2026, 9, 10), resultsHidden: true); // still hidden
+      await insertSession(DateTime.utc(2026, 9, 12), ended: false); // app killed mid-dive
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final current = await insertSession(oct5);
+
+      final previous = await previousFor(current, oct5);
+
+      expect(previous?.session.id, revealed);
+    });
+
+    test('a session started at the same instant is not "previous"', () async {
+      final oct5 = DateTime.utc(2026, 10, 5);
+      await insertSession(oct5);
+      final current = await insertSession(oct5);
+
+      expect(await previousFor(current, oct5), isNull);
+    });
+
+    test('no site name, or a blank one, never matches', () async {
+      await insertSession(DateTime.utc(2026, 9, 12), site: null);
+      await insertSession(DateTime.utc(2026, 9, 13), site: '  ');
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final current = await insertSession(oct5, site: null);
+
+      expect(await previousFor(current, oct5, site: null), isNull);
+      expect(await previousFor(current, oct5, site: ' '), isNull);
     });
   });
 
@@ -687,6 +796,64 @@ void main() {
         isTrue,
       );
       expect((await db.sessionById(sessionId))!.recount!.blinded, isFalse);
+    });
+
+    // Sub-plan 19 review: a migrated row's `results_hidden` is NULL, and
+    // `NOT (NULL = 1 AND ...)` is NULL in SQL -- the old survey must still
+    // count as "previous", as `resultsCurrentlyHidden` already says.
+    test('a survey from before v7 is still found by previousSessionForSite', () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v6_prev_');
+      addTearDown(() => dir.delete(recursive: true));
+      final v6 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 6,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await _createPreV9ColoniesTable(db);
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL,
+              site_name TEXT,
+              observer_name TEXT,
+              video_path TEXT,
+              last_checkpoint_at TEXT,
+              interruption_count INTEGER,
+              first_interrupted_at TEXT,
+              last_interrupted_at TEXT,
+              thermal_peak TEXT,
+              thermal_rise_count INTEGER,
+              entry_lat REAL, entry_lon REAL, entry_accuracy_m REAL,
+              entry_at TEXT, entry_source TEXT,
+              exit_lat REAL, exit_lon REAL, exit_accuracy_m REAL,
+              exit_at TEXT, exit_source TEXT
+            )
+          ''');
+        },
+      );
+      final oldId = await v6.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 9, 1).toIso8601String(),
+        'ended_at': DateTime.utc(2026, 9, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+        'site_name': 'Alegria',
+      });
+      await v6.close();
+
+      final db = await TransectDatabase.open(dir.path);
+      addTearDown(db.close);
+      final oct5 = DateTime.utc(2026, 10, 5);
+      final currentId = await db.insertSession(
+        TransectSession(startedAt: oct5, tapeLengthMeters: 50, siteName: 'Alegria'),
+      );
+
+      final previous =
+          await db.previousSessionForSite('Alegria', before: oct5, excludingId: currentId);
+
+      expect(previous?.session.id, oldId);
     });
 
     test('results_hidden round-trips and hides results until revealed', () async {

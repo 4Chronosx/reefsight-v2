@@ -8,12 +8,14 @@ import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/colony_photos.dart';
 import '../services/device_checks.dart';
+import '../services/executive_summary.dart';
 import '../services/geo_fix.dart';
 import '../services/geo_fix_controller.dart';
 import '../services/location_provider.dart';
 import '../services/recount_comparison.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
+import '../services/session_summary.dart';
 import '../services/tracked_colony_record.dart';
 import '../services/transect_session.dart';
 import '../services/transect_video.dart';
@@ -27,9 +29,9 @@ import 'video_player_screen.dart';
 /// (ui-ux-overhaul) step 4: the post-dive report, two tabs on one dataset
 /// per `ReefSight_Specification.md`'s "Post-dive report" line -- Executive
 /// (LGU/decision-maker audience) and Technical (academic panel). The
-/// Executive tab's content is unchanged by sub-plan 6 (Spec line 125 marks
-/// it `[OPEN]`); this pass only applies the shared theme, adds a header, and
-/// fixes the back-stack so Summary always returns to [AppShell], never to
+/// Executive tab's content is sub-plan 19's (`executive_summary.dart`);
+/// sub-plan 6 applied the shared theme, added a header, and
+/// fixed the back-stack so Summary always returns to [AppShell], never to
 /// Transect Setup (sub-plan 6 step 4).
 class SummaryScreen extends StatefulWidget {
   const SummaryScreen({
@@ -37,7 +39,7 @@ class SummaryScreen extends StatefulWidget {
     required this.sessionId,
     this.openDatabase = openAppDatabase,
     this.locationProvider = const GeolocatorLocationProvider(),
-    this.resolveVideo = resolveTransectVideo,
+    this.resolveVideo = resolveSessionVideo,
     this.resolvePhotos = _resolvePhotosInDocuments,
   });
 
@@ -53,8 +55,10 @@ class SummaryScreen extends StatefulWidget {
 
   /// Finds the session's recording on disk. Injectable because the default
   /// needs `path_provider`, so under `flutter test` there is otherwise never
-  /// a video (sub-plan 16's colony play buttons).
-  final Future<File?> Function(String? storedPath) resolveVideo;
+  /// a video (sub-plan 16's colony play buttons). Takes the session, not
+  /// just its stored path: an incomplete survey has no path, and its
+  /// leftover recording is found by start time (`resolveSessionVideo`).
+  final Future<File?> Function(TransectSession session) resolveVideo;
 
   /// Sub-plan 18: finds the colonies' photos under the current documents
   /// directory. Injectable for the same reason as [resolveVideo].
@@ -90,16 +94,27 @@ class _SummaryScreenState extends State<SummaryScreen> {
   /// the report like [_videoFile].
   ColonyPhotoFiles _photos = ColonyPhotoFiles.empty;
 
+  /// Sub-plan 19: the last survey of the same site, for the Executive tab's
+  /// comparison line. `null` when there is none.
+  SessionSummary? _previous;
+
   Future<TransectReport> _loadReport() async {
     final db = await widget.openDatabase();
     try {
-      final session = await db.sessionById(widget.sessionId);
-      if (session == null) {
+      final loaded = await db.sessionById(widget.sessionId);
+      if (loaded == null) {
         throw StateError('Transect session ${widget.sessionId} not found');
       }
+      var session = loaded;
       final colonies = await db.colonyRowsForSession(widget.sessionId);
       try {
-        _videoFile = await widget.resolveVideo(session.videoPath);
+        final video = await widget.resolveVideo(session);
+        _videoFile = video;
+        // A leftover recording (crash recovery): in memory only, so colony
+        // jumps take video zero from its file name rather than startedAt.
+        if (video != null && session.videoPath == null) {
+          session = session.copyWith(videoPath: video.path);
+        }
       } catch (error) {
         // A video lookup failure (e.g. no path_provider under tests) must
         // not take the whole report down with it.
@@ -109,6 +124,16 @@ class _SummaryScreenState extends State<SummaryScreen> {
         _photos = await widget.resolvePhotos(colonies);
       } catch (error) {
         debugPrint('ReefSight: failed to resolve colony photos: $error');
+      }
+      try {
+        _previous = await db.previousSessionForSite(
+          session.siteName,
+          before: session.startedAt,
+          excludingId: widget.sessionId,
+        );
+      } catch (error) {
+        // No comparison is better than no report.
+        debugPrint('ReefSight: failed to look up the previous survey: $error');
       }
       return TransectReport(session: session, colonies: colonies);
     } finally {
@@ -182,6 +207,7 @@ class _SummaryScreenState extends State<SummaryScreen> {
               report: report,
               videoFile: _videoFile,
               photos: _photos,
+              previous: _previous,
               exitFix: exitFix,
               openDatabase: widget.openDatabase,
               onRecountSaved: _reload,
@@ -201,6 +227,7 @@ class _ReportBody extends StatelessWidget {
     required this.report,
     this.videoFile,
     this.photos = ColonyPhotoFiles.empty,
+    this.previous,
     this.exitFix,
     required this.openDatabase,
     required this.onRecountSaved,
@@ -209,6 +236,7 @@ class _ReportBody extends StatelessWidget {
   final TransectReport report;
   final File? videoFile;
   final ColonyPhotoFiles photos;
+  final SessionSummary? previous;
 
   /// Sub-plan 12: the "Record exit position" section, only while the
   /// session has no exit fix.
@@ -228,6 +256,7 @@ class _ReportBody extends StatelessWidget {
             report: report,
             videoFile: videoFile,
             photos: photos,
+            previous: previous,
             openDatabase: openDatabase,
             onRecountSaved: onRecountSaved,
           ),
@@ -873,6 +902,7 @@ class _ReportTabs extends StatelessWidget {
     required this.report,
     this.videoFile,
     required this.photos,
+    this.previous,
     required this.openDatabase,
     required this.onRecountSaved,
   });
@@ -880,6 +910,7 @@ class _ReportTabs extends StatelessWidget {
   final TransectReport report;
   final File? videoFile;
   final ColonyPhotoFiles photos;
+  final SessionSummary? previous;
   final DatabaseOpener openDatabase;
   final VoidCallback onRecountSaved;
 
@@ -901,7 +932,7 @@ class _ReportTabs extends StatelessWidget {
           Expanded(
             child: TabBarView(
               children: [
-                _ExecutiveTab(report: report, photos: photos),
+                _ExecutiveTab(report: report, photos: photos, previous: previous),
                 _TechnicalTab(
                   report: report,
                   videoFile: videoFile,
@@ -918,118 +949,185 @@ class _ReportTabs extends StatelessWidget {
   }
 }
 
-/// LGU/decision-maker audience: a healthy/bleached donut and bleaching
-/// prevalence framed in plain language -- no track IDs, confidence numbers,
-/// or size-frequency detail (that's the Technical tab). Content is
-/// unchanged from sub-plan 5 -- Spec line 125 marks this tab `[OPEN]`, and
-/// this sub-plan restyles what exists rather than inventing new content.
+/// LGU/decision-maker audience (sub-plan 19): the Municipal Environment
+/// and Natural Resources Office and the MPA boards. Top to bottom: the
+/// status sentence, the comparison with the last survey of this site, the
+/// bleached colonies' photos, the key figures, what one survey can't tell
+/// you, and the survey details. All wording comes from [ExecutiveSummary];
+/// no track IDs, confidences or size-frequency (that's the Technical tab).
 class _ExecutiveTab extends StatelessWidget {
-  const _ExecutiveTab({required this.report, required this.photos});
+  const _ExecutiveTab({required this.report, required this.photos, this.previous});
 
   final TransectReport report;
   final ColonyPhotoFiles photos;
+  final SessionSummary? previous;
+
+  static const _headingStyle = TextStyle(
+    fontWeight: FontWeight.bold,
+    fontSize: 15,
+    color: AppColors.onSurface,
+  );
 
   @override
   Widget build(BuildContext context) {
-    final prevalence = report.prevalence;
+    final summary = ExecutiveSummary.build(report, previous: previous);
+    final comparison = summary.comparison;
+    final muted = AppColors.onSurface.withValues(alpha: 0.7);
 
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        SizedBox(
-          height: 190,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              PieChart(
-                PieChartData(
-                  sectionsSpace: 2,
-                  centerSpaceRadius: 58,
-                  startDegreeOffset: -90,
-                  sections: _donutSections(report),
-                ),
-              ),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${report.totalColonies}',
-                    style: const TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.onSurface,
-                    ),
-                  ),
-                  Text(
-                    report.totalColonies == 1 ? 'colony' : 'colonies',
-                    style: TextStyle(
-                      color: AppColors.onSurface.withValues(alpha: 0.6),
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        // Sub-plan 10: prevalence below is over the classified colonies
-        // only, so show that denominator next to the total.
-        Text(
-          '${report.totalColonies} '
-          '${report.totalColonies == 1 ? 'colony' : 'colonies'} · '
-          '${report.classifiedCount} classified · '
-          '${report.uncertainCount} uncertain',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: AppColors.onSurface.withValues(alpha: 0.7),
-            fontSize: 13,
-          ),
-        ),
-        const SizedBox(height: 16),
-        // Out of the classified colonies, matching the prevalence sentence
-        // below -- with many Uncertain colonies, dividing by the total would
-        // make the bars and the percentage disagree.
-        HealthBar(
-          label: 'Healthy',
-          count: report.healthyCount,
-          total: report.classifiedCount,
-          color: AppColors.healthy,
-        ),
-        const SizedBox(height: 8),
-        HealthBar(
-          label: 'Bleached',
-          count: report.bleachedCount,
-          total: report.classifiedCount,
-          color: AppColors.bleached,
-        ),
-        const SizedBox(height: 24),
         Card(
+          key: const ValueKey('exec-status'),
           child: Padding(
             padding: const EdgeInsets.all(16),
-            // Sub-plan 17: the interval, or "too few" below
-            // `minClassifiedForPrevalence` -- no caveats beyond that here.
             child: Text(
-              prevalence?.executiveSentence ??
-                  'No colonies were successfully classified this session.',
-              style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
+              summary.statusSentence,
+              style: const TextStyle(color: AppColors.onSurface, fontSize: 16, height: 1.4),
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        Text(
-          'Density: ${report.executiveDensityLine}',
-          style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
-        ),
+        if (comparison != null) ...[
+          const SizedBox(height: 8),
+          Row(
+            key: const ValueKey('exec-comparison'),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(_comparisonIcon(comparison.direction), size: 20, color: muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  comparison.text,
+                  style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
+                ),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 24),
         BleachedColonyStrip(
+          key: const ValueKey('exec-photos'),
           colonies: report.colonies,
           photos: photos,
           prevalenceReliable: report.prevalenceReliable,
         ),
+        const SizedBox(height: 24),
+        Column(
+          key: const ValueKey('exec-figures'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Key figures', style: _headingStyle),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 190,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  PieChart(
+                    PieChartData(
+                      sectionsSpace: 2,
+                      centerSpaceRadius: 58,
+                      startDegreeOffset: -90,
+                      sections: _donutSections(report),
+                    ),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${report.totalColonies}',
+                        style: const TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.onSurface,
+                        ),
+                      ),
+                      Text(
+                        report.totalColonies == 1 ? 'colony' : 'colonies',
+                        style: TextStyle(
+                          color: AppColors.onSurface.withValues(alpha: 0.6),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Sub-plan 10: prevalence is over the classified colonies only,
+            // so show that denominator next to the total.
+            Text(
+              '${report.totalColonies} '
+              '${report.totalColonies == 1 ? 'colony' : 'colonies'} · '
+              '${report.classifiedCount} classified · '
+              '${report.uncertainCount} uncertain',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: muted, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            // Out of the classified colonies, matching the status sentence
+            // -- with many Uncertain colonies, dividing by the total would
+            // make the bars and the percentage disagree.
+            HealthBar(
+              label: 'Healthy',
+              count: report.healthyCount,
+              total: report.classifiedCount,
+              color: AppColors.healthy,
+            ),
+            const SizedBox(height: 8),
+            HealthBar(
+              label: 'Bleached',
+              count: report.bleachedCount,
+              total: report.classifiedCount,
+              color: AppColors.bleached,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Density: ${report.executiveDensityLine}',
+              style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
+            ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        Column(
+          key: const ValueKey('exec-limitations'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("What this survey can't tell you", style: _headingStyle),
+            const SizedBox(height: 6),
+            for (final line in summary.limitations)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('• $line', style: TextStyle(color: muted, fontSize: 13)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        Column(
+          key: const ValueKey('exec-details'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final (label, value) in summary.details)
+              Text(
+                '$label: $value',
+                style: TextStyle(
+                  color: AppColors.onSurface.withValues(alpha: 0.6),
+                  fontSize: 12,
+                ),
+              ),
+          ],
+        ),
       ],
     );
   }
+
+  static IconData _comparisonIcon(ComparisonDirection direction) => switch (direction) {
+        ComparisonDirection.up => Icons.arrow_upward,
+        ComparisonDirection.down => Icons.arrow_downward,
+        ComparisonDirection.similar => Icons.drag_handle,
+        ComparisonDirection.notComparable => Icons.info_outline,
+      };
 
   List<PieChartSectionData> _donutSections(TransectReport report) {
     if (report.totalColonies == 0) {

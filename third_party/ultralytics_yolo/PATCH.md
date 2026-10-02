@@ -91,3 +91,11 @@ check `setUp(sessionPreset: .photo)` in `YOLOView.swift` against
 `AVCaptureMovieFileOutput`: if "Cannot add movie file output" is logged,
 there is no recorder at all. Until then the app keeps a video only if a
 non-empty file exists at End Transect, and Summary says why when it doesn't.
+
+**Interruptions (2026-10-03).** The app detects one kind on the Dart side:
+the app leaving the foreground (`AppLifecycleState.hidden`/`paused`), when
+iOS always stops the camera. The Live screen then replaces the REC timer
+with "Interrupted at mm:ss". A recording that stops on its own mid-dive
+(e.g. disk full) is still invisible: `fileOutput(_:didFinishRecordingTo:...)`
+only hands the error to a completion nobody reports. Surfacing it needs an
+event from Swift (e.g. on the existing streaming channel).

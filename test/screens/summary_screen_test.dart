@@ -230,7 +230,9 @@ void main() {
       await pumpWithLabels(tester, labels(bleached: 3, healthy: 3));
 
       expect(
-        find.text('Too few classified colonies to estimate bleaching reliably (n = 6).'),
+        // Sub-plan 19: the sentence now follows the survey line in the
+        // Executive status card.
+        find.textContaining('Too few classified colonies to estimate bleaching reliably (n = 6).'),
         findsOneWidget,
       );
       expect(find.textContaining('of classified colonies were bleached'), findsNothing);
@@ -252,7 +254,7 @@ void main() {
       await pumpWithLabels(tester, labels(bleached: 5, healthy: 5));
 
       expect(
-        find.text('About 50% of classified colonies were bleached '
+        find.textContaining('About 50% of classified colonies were bleached '
             '(likely between 24% and 76%).'),
         findsOneWidget,
       );
@@ -296,6 +298,37 @@ void main() {
 
       expect(find.text("No video: the camera didn't record a file during this survey."), findsOneWidget);
       expect(find.text('Watch transect video'), findsNothing);
+    });
+
+    // Crash recovery: an incomplete survey gets its leftover recording.
+    testWidgets('an incomplete survey with a leftover recording shows the button',
+        (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final id = await db.insertSession(
+        TransectSession(startedAt: start, tapeLengthMeters: 50),
+      );
+      TransectSession? asked;
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(
+              sessionId: id,
+              openDatabase: () async => db,
+              resolveVideo: (session) async {
+                asked = session;
+                return File('/docs/transect_2026-10-01T09-00-03-000Z.mov');
+              },
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+
+      expect(asked?.endedAt, isNull);
+      expect(find.text('Watch transect video'), findsOneWidget);
+      expect(find.textContaining('No video'), findsNothing);
     });
 
     testWidgets('a stored file that is gone is named', (tester) async {
@@ -1087,6 +1120,94 @@ void main() {
 
       expect(find.text('Share report with photos'), findsNothing);
       expect(find.byKey(const ValueKey('colony-thumbnail-1')), findsNothing);
+    });
+  });
+
+  // Sub-plan 19: the Executive tab answers "how is it, compared with last
+  // time, and how sure are we" first; the wording itself is tested in
+  // `executive_summary_test.dart`.
+  group('Executive summary (sub-plan 19)', () {
+    const sections = [
+      'exec-status',
+      'exec-comparison',
+      'exec-photos',
+      'exec-figures',
+      'exec-limitations',
+      'exec-details',
+    ];
+
+    /// The current survey (20 of 40 bleached) at Gilutongan on 5 Oct, and,
+    /// with [withPrevious], an earlier one there on 12 Sep (2 of 40).
+    Future<void> pumpSurvey(WidgetTester tester, {required bool withPrevious}) async {
+      // Tall enough that the lazy ListView builds every section.
+      tester.view.physicalSize = const Size(800, 4000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+
+      Future<int> survey(DateTime startedAt, {required int bleached}) async {
+        final id = await db.insertSession(
+          TransectSession(startedAt: startedAt, tapeLengthMeters: 50, siteName: 'Gilutongan'),
+        );
+        await db.closeSession(id, startedAt.add(const Duration(hours: 1)));
+        await db.upsertColonies([
+          for (var i = 0; i < 40; i++)
+            TrackedColonyRecord(
+              sessionId: id,
+              trackId: i + 1,
+              healthLabel: i < bleached ? 'CORAL_BL' : 'CORAL',
+              healthHistory: const [],
+              firstSeenAt: startedAt,
+              lastSeenAt: startedAt,
+            ),
+        ]);
+        return id;
+      }
+
+      if (withPrevious) await survey(DateTime(2026, 9, 12, 9), bleached: 2);
+      final sessionId = await survey(DateTime(2026, 10, 5, 8, 30), bleached: 20);
+
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(sessionId: sessionId, openDatabase: () async => db),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('renders the sections in order, with the comparison second', (tester) async {
+      await pumpSurvey(tester, withPrevious: true);
+
+      final tops = [
+        for (final key in sections) tester.getTopLeft(find.byKey(ValueKey(key))).dy,
+      ];
+      for (var i = 1; i < tops.length; i++) {
+        expect(tops[i], greaterThan(tops[i - 1]), reason: '${sections[i]} after ${sections[i - 1]}');
+      }
+      expect(
+        find.textContaining('40 coral colonies were surveyed along the 50 m transect at Gilutongan '
+            'on 5 Oct 2026.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Up from 5% at the last survey of this site (12 Sep 2026).'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('severe bleaching'), findsOneWidget);
+      expect(find.text('• One transect is a sample, not the whole reef.'), findsOneWidget);
+    });
+
+    testWidgets('without a previous survey there is no comparison line', (tester) async {
+      await pumpSurvey(tester, withPrevious: false);
+
+      expect(find.byKey(const ValueKey('exec-comparison')), findsNothing);
+      for (final key in sections.where((key) => key != 'exec-comparison')) {
+        expect(find.byKey(ValueKey(key)), findsOneWidget, reason: key);
+      }
     });
   });
 }

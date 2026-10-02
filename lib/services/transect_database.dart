@@ -406,7 +406,46 @@ class TransectDatabase {
   /// included -- Surveys must list and flag them as incomplete, not hide
   /// them (decision 8 in the sub-plan: no delete/clear action exists, so an
   /// incomplete session is the only way that data is ever seen again).
-  Future<List<SessionSummary>> listSessions() async {
+  Future<List<SessionSummary>> listSessions() => _sessionSummaries();
+
+  /// Sub-plan 19 step 2: the latest survey of the same site before
+  /// [before], for the Executive tab's "compared with the last survey".
+  /// "Same site" is the site name trimmed and case-insensitive for now
+  /// (SQLite's `LOWER` folds ASCII only; Cordova's site names are ASCII) --
+  /// proper site identity is future work (sub-plan 12). Skips incomplete
+  /// sessions (a partial transect isn't comparable) and sessions whose
+  /// results are still hidden for a blinded recount (sub-plan 14): showing
+  /// their prevalence here would unblind it (`results_hidden` is NULL on
+  /// rows from before schema v7, which were never hidden). `null` when [siteName] is
+  /// missing or blank, or nothing matches. [before] is compared as a
+  /// `DateTime` rather than in SQL because `started_at` strings aren't
+  /// stored normalized to UTC.
+  Future<SessionSummary?> previousSessionForSite(
+    String? siteName, {
+    required DateTime before,
+    required int excludingId,
+  }) async {
+    final site = siteName?.trim().toLowerCase() ?? '';
+    if (site.isEmpty) return null;
+    final candidates = await _sessionSummaries(
+      where: '''
+        LOWER(TRIM(s.site_name)) = ?
+        AND s.ended_at IS NOT NULL
+        AND (COALESCE(s.results_hidden, 0) != 1 OR s.results_revealed_at IS NOT NULL)
+        AND s.id != ?
+      ''',
+      whereArgs: [site, excludingId],
+    );
+    for (final candidate in candidates) {
+      if (candidate.session.startedAt.isBefore(before)) return candidate;
+    }
+    return null;
+  }
+
+  Future<List<SessionSummary>> _sessionSummaries({
+    String? where,
+    List<Object?> whereArgs = const [],
+  }) async {
     final rows = await _db.rawQuery('''
       SELECT s.*,
              COUNT(c.id) AS colony_count,
@@ -414,9 +453,10 @@ class TransectDatabase {
              COUNT(c.health_label) AS classified_count
       FROM $_sessionsTable s
       LEFT JOIN $_coloniesTable c ON c.session_id = s.id
+      ${where == null ? '' : 'WHERE $where'}
       GROUP BY s.id
       ORDER BY s.started_at DESC, s.id DESC
-    ''', [HealthAggregator.bleachedLabel]);
+    ''', [HealthAggregator.bleachedLabel, ...whereArgs]);
 
     return rows
         .map(

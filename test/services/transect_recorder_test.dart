@@ -1,3 +1,5 @@
+import 'dart:ui' show AppLifecycleState;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/transect_recorder.dart';
 
@@ -126,6 +128,70 @@ void main() {
       expect(recorder.isRecording, isFalse);
       await recorder.stop();
       expect(stopCalls, 1);
+    });
+  });
+
+  // The Live screen waits for the camera view to attach before recording;
+  // asking earlier was silently dropped, so no transect ever had a video.
+  group('waitUntil', () {
+    test('true as soon as the condition holds', () async {
+      var ready = false;
+      Future<void>.delayed(const Duration(milliseconds: 30), () => ready = true);
+      expect(
+        await waitUntil(() => ready, interval: const Duration(milliseconds: 5)),
+        isTrue,
+      );
+    });
+
+    test('false when it never holds within the timeout', () async {
+      expect(
+        await waitUntil(
+          () => false,
+          timeout: const Duration(milliseconds: 40),
+          interval: const Duration(milliseconds: 5),
+        ),
+        isFalse,
+      );
+    });
+
+    test('true immediately, without waiting, when already true', () async {
+      final watch = Stopwatch()..start();
+      expect(await waitUntil(() => true), isTrue);
+      expect(watch.elapsedMilliseconds, lessThan(50));
+    });
+  });
+
+  // iOS stops the camera whenever the app leaves the foreground, so a REC
+  // timer still counting after that would be a lie.
+  group('recordingInterruptedMessage', () {
+    const elapsed = Duration(minutes: 12, seconds: 34);
+
+    test('leaving the foreground while recording interrupts it', () {
+      for (final state in [AppLifecycleState.hidden, AppLifecycleState.paused]) {
+        expect(
+          recordingInterruptedMessage(state, recording: true, elapsed: elapsed),
+          'Interrupted at 12:34 - nothing after this is recorded',
+          reason: '',
+        );
+      }
+    });
+
+    test('inactive (Control Centre, a banner) keeps the camera running', () {
+      expect(
+        recordingInterruptedMessage(AppLifecycleState.inactive, recording: true, elapsed: elapsed),
+        isNull,
+      );
+    });
+
+    test('nothing to interrupt when not recording, or when resuming', () {
+      expect(
+        recordingInterruptedMessage(AppLifecycleState.paused, recording: false, elapsed: elapsed),
+        isNull,
+      );
+      expect(
+        recordingInterruptedMessage(AppLifecycleState.resumed, recording: true, elapsed: elapsed),
+        isNull,
+      );
     });
   });
 }

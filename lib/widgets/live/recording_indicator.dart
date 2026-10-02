@@ -44,15 +44,33 @@ class RecordingIndicator extends StatelessWidget {
             size: 14,
           ),
           const SizedBox(width: 6),
-          Text(
-            hasError
-                ? 'Recording issue'
-                : (isRecording ? 'REC $minutes:$seconds' : 'Not recording'),
-            style: TextStyle(
-              color: hasError ? Colors.amber : Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-            ),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                hasError
+                    ? 'Recording issue'
+                    : (isRecording ? 'REC $minutes:$seconds' : 'Not recording'),
+                style: TextStyle(
+                  color: hasError ? Colors.amber : Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              // The reason, readable on the device: in the field there's no
+              // Xcode console to find it in.
+              if (hasError)
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 260),
+                  child: Text(
+                    errorMessage!,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.amber, fontSize: 11),
+                  ),
+                ),
+            ],
           ),
         ],
       ),

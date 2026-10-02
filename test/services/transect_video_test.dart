@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_recorder.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -137,6 +138,7 @@ void main() {
   });
 
   recordingFailureTests();
+  orphanedVideoTests();
 }
 
 // Recording failures used to be silent end to end: the native start
@@ -205,6 +207,81 @@ void recordingFailureTests() {
         missingVideoNote(session(videoPath: '/old/container/transect_2026-10-01T09-00-01-500Z.mov'), null),
         'No video: transect_2026-10-01T09-00-01-500Z.mov is not on this phone.',
       );
+    });
+  });
+}
+
+// Crash recovery: a survey that never reached End Transect has no saved
+// video path, but its recording may still be on disk. It's found by the
+// start time in its file name, shortly after the survey started.
+void orphanedVideoTests() {
+  group('findOrphanedVideo', () {
+    late Directory dir;
+    final start = DateTime.utc(2026, 10, 1, 9);
+
+    setUp(() => dir = Directory.systemTemp.createTempSync('reefsight_orphan_'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    File movie(String stamp, {bool empty = false}) =>
+        File('${dir.path}/transect_$stamp.mov')..writeAsBytesSync(empty ? [] : [1]);
+
+    TransectSession incomplete() =>
+        TransectSession(startedAt: start, tapeLengthMeters: 50);
+
+    test('finds the recording that started just after the survey', () async {
+      movie('2026-10-01T08-40-00-000Z'); // an earlier survey's
+      final ours = movie('2026-10-01T09-00-03-250Z');
+      movie('2026-10-01T09-30-00-000Z'); // a later survey's
+
+      expect(p.basename((await findOrphanedVideo(incomplete(), dir.path))!.path), p.basename(ours.path));
+    });
+
+    test('nothing inside the window -> null', () async {
+      movie('2026-10-01T09-05-00-000Z');
+      expect(await findOrphanedVideo(incomplete(), dir.path), isNull);
+    });
+
+    test('ignores empty files and other names', () async {
+      movie('2026-10-01T09-00-02-000Z', empty: true);
+      File('${dir.path}/notes.mov').writeAsBytesSync([1]);
+      expect(await findOrphanedVideo(incomplete(), dir.path), isNull);
+    });
+
+    test('the earliest of two candidates wins', () async {
+      final first = movie('2026-10-01T09-00-02-000Z');
+      movie('2026-10-01T09-00-40-000Z');
+      expect(p.basename((await findOrphanedVideo(incomplete(), dir.path))!.path), p.basename(first.path));
+    });
+  });
+
+  group('resolveSessionVideo', () {
+    late Directory dir;
+    final start = DateTime.utc(2026, 10, 1, 9);
+
+    setUp(() => dir = Directory.systemTemp.createTempSync('reefsight_resolve_'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    test('an incomplete survey falls back to its leftover recording', () async {
+      final file = File('${dir.path}/transect_2026-10-01T09-00-03-000Z.mov')
+        ..writeAsBytesSync([1]);
+      final resolved = await resolveSessionVideo(
+        TransectSession(startedAt: start, tapeLengthMeters: 50),
+        documentsDirectory: dir.path,
+      );
+      expect(p.basename(resolved!.path), p.basename(file.path));
+    });
+
+    test('an ended survey without a saved path is not guessed at', () async {
+      File('${dir.path}/transect_2026-10-01T09-00-03-000Z.mov').writeAsBytesSync([1]);
+      final resolved = await resolveSessionVideo(
+        TransectSession(
+          startedAt: start,
+          endedAt: start.add(const Duration(minutes: 30)),
+          tapeLengthMeters: 50,
+        ),
+        documentsDirectory: dir.path,
+      );
+      expect(resolved, isNull);
     });
   });
 }

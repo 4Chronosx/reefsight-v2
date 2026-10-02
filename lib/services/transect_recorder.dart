@@ -1,3 +1,5 @@
+import 'dart:ui' show AppLifecycleState;
+
 /// Lifecycle wrapper for one transect's continuous video recording
 /// (sub-plan 3 step 1).
 ///
@@ -64,4 +66,40 @@ class TransectRecorder {
         .replaceAll(RegExp('[:.]'), '-');
     return 'transect_$timestamp.mov';
   }
+}
+
+/// Polls [condition] every [interval] until it holds (`true`) or [timeout]
+/// passes (`false`). The Live screen uses it to wait for the camera's
+/// platform view to attach before recording: the view is created after the
+/// first frame, and a start sent before then never reached the camera.
+Future<bool> waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 10),
+  Duration interval = const Duration(milliseconds: 100),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) return false;
+    await Future<void>.delayed(interval);
+  }
+  return true;
+}
+
+/// The Live screen's recording-issue line when the app leaves the
+/// foreground mid-recording, or `null` when [state] doesn't interrupt it.
+/// iOS stops the camera in the background (`hidden`, then `paused`), and
+/// the recording isn't restarted on return, so the REC timer would keep
+/// counting video that doesn't exist. `inactive` (Control Centre, a
+/// notification banner) leaves the camera running. [elapsed] is the Live
+/// screen's own REC time, so the stamp matches what the diver saw.
+String? recordingInterruptedMessage(
+  AppLifecycleState state, {
+  required bool recording,
+  required Duration elapsed,
+}) {
+  if (!recording) return null;
+  if (state != AppLifecycleState.hidden && state != AppLifecycleState.paused) return null;
+  final minutes = elapsed.inMinutes.toString().padLeft(2, '0');
+  final seconds = (elapsed.inSeconds % 60).toString().padLeft(2, '0');
+  return 'Interrupted at $minutes:$seconds - nothing after this is recorded';
 }

@@ -28,6 +28,52 @@ Future<File?> resolveTransectVideo(String? storedPath) async {
   return null;
 }
 
+/// How long after a survey's start its recording can begin: the Live screen
+/// waits up to 10 s for the camera view and 1.5 s more before starting.
+const orphanedVideoWindow = Duration(minutes: 1);
+
+/// Crash recovery: the recording of [session], which never reached End
+/// Transect (so no path was saved), found in [directory] by the start time
+/// in its file name -- the earliest non-empty `transect_*.mov` from a few
+/// seconds before the survey started to [orphanedVideoWindow] after. Every
+/// survey starts its own recording, so the next survey's file is minutes
+/// later. The file may end early (iOS writes it in ~10 s fragments) but
+/// plays up to the crash.
+Future<File?> findOrphanedVideo(TransectSession session, String directory) async {
+  final from = session.startedAt.subtract(const Duration(seconds: 5));
+  final to = session.startedAt.add(orphanedVideoWindow);
+  File? best;
+  DateTime? bestStart;
+  await for (final entity in Directory(directory).list()) {
+    if (entity is! File) continue;
+    final start = videoStartFromFileName(entity.path);
+    if (start == null || start.isBefore(from) || start.isAfter(to)) continue;
+    if (await entity.length() == 0) continue;
+    if (bestStart == null || start.isBefore(bestStart)) {
+      best = entity;
+      bestStart = start;
+    }
+  }
+  return best;
+}
+
+/// Summary's video for [session]: the saved path ([resolveTransectVideo]),
+/// or, for a survey that never ended normally, its leftover recording
+/// ([findOrphanedVideo]). An ended survey without a saved path is not
+/// guessed at: End Transect already checked and found no file.
+/// [documentsDirectory] defaults to the app's documents directory.
+Future<File?> resolveSessionVideo(
+  TransectSession session, {
+  String? documentsDirectory,
+}) async {
+  final stored = session.videoPath;
+  if (stored != null && stored.isNotEmpty) return resolveTransectVideo(stored);
+  if (session.endedAt != null) return null;
+  final directory =
+      documentsDirectory ?? (await getApplicationDocumentsDirectory()).path;
+  return findOrphanedVideo(session, directory);
+}
+
 /// The recording path to save at End Transect: [path] only if a non-empty
 /// file is actually there. The native start can report success without
 /// recording (third_party/ultralytics_yolo/PATCH.md), so whether
