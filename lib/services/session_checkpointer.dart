@@ -33,6 +33,7 @@ class SessionCheckpointer {
     this.interval = const Duration(seconds: 10),
     DateTime Function()? now,
     this.onFailure,
+    this.beforeSnapshot,
   })  : _db = db,
         _sessionId = sessionId,
         _snapshot = snapshot,
@@ -52,6 +53,12 @@ class SessionCheckpointer {
   /// Live screen redraws its diagnostics overlay ("checkpoint failed ×N").
   final void Function(Object error)? onFailure;
 
+  /// Sub-plan 18: runs at the start of every checkpoint, inside the write
+  /// queue, before the snapshot is taken -- the Live screen writes changed
+  /// colony photos here so the snapshot's rows carry their paths. A failure
+  /// is counted like any other, and the rows are still written.
+  final Future<void> Function()? beforeSnapshot;
+
   /// Failed checkpoint or interruption writes. Never swallowed silently:
   /// logged, counted here, and reported through [onFailure].
   int get failureCount => _failureCount;
@@ -67,17 +74,16 @@ class SessionCheckpointer {
 
   /// What each track looked like at its last successful write. A track is
   /// rewritten only when this changes: new track, new health sample, new
-  /// size, new label, or a later `lastSeenAt`.
-  final Map<int, (DateTime, int, double?, String?)> _written = {};
+  /// size, new label, a later `lastSeenAt`, or a new or better photo.
+  final Map<int, Object> _written = {};
 
-  static (DateTime, int, double?, String?) _fingerprint(
-    TrackedColonyRecord record,
-  ) =>
-      (
+  static Object _fingerprint(TrackedColonyRecord record) => (
         record.lastSeenAt,
         record.healthHistory.length,
         record.sizePx,
         record.healthLabel,
+        record.photoPath,
+        record.photoConfidence,
       );
 
   /// Starts checkpointing every [interval]. A no-op if already started or
@@ -101,6 +107,14 @@ class SessionCheckpointer {
     // before finalize was requested, but not yet started, must not run
     // after it either.
     if (_closed) return;
+    final before = beforeSnapshot;
+    if (before != null) {
+      try {
+        await before();
+      } catch (error) {
+        _fail('photo write', error);
+      }
+    }
     try {
       final changed = [
         for (final record in _snapshot())

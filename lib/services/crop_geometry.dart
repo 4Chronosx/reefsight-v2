@@ -50,6 +50,27 @@ CropRegion computeCropRegion(
   );
 }
 
+/// Sub-plan 18 decision 1: the region a colony's context photo is cut from
+/// -- the detection box grown by [scale] about its centre, so the photo
+/// shows a little of the reef around the colony, clamped like
+/// [computeCropRegion].
+CropRegion computeContextRegion(
+  Rect boxPixels, {
+  required int frameWidth,
+  required int frameHeight,
+  double scale = 1.5,
+}) {
+  return computeCropRegion(
+    Rect.fromCenter(
+      center: boxPixels.center,
+      width: boxPixels.width * scale,
+      height: boxPixels.height * scale,
+    ),
+    frameWidth: frameWidth,
+    frameHeight: frameHeight,
+  );
+}
+
 /// How the bleaching classifier's input is cut from the frame (sub-plan 10,
 /// "Crop spec v1"). [insideMaskSquare] is the live default; the other two
 /// are kept behind a debug setting for ML sub-plan 2's comparison.

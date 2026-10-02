@@ -91,6 +91,40 @@ void main() {
       expect(rows[1][1], 'UNCERTAIN');
     });
 
+    // Sub-plan 18 step 6: the photo paths (relative to the app's documents
+    // directory, as stored) and the sample they show.
+    test('writes the photo columns, empty for a colony with no photo', () async {
+      final withPhoto = TrackedColonyRecord(
+        sessionId: 1,
+        trackId: 3,
+        healthLabel: 'CORAL_BL',
+        healthHistory: const [],
+        firstSeenAt: DateTime.utc(2026, 1, 1, 8),
+        lastSeenAt: DateTime.utc(2026, 1, 1, 8, 1),
+        photoPath: 'colony_photos/session1_track3.jpg',
+        photoCropPath: 'colony_photos/session1_track3_crop.jpg',
+        photoLabel: 'CORAL_BL',
+        photoConfidence: 0.876,
+      );
+      final path = await ReportExporter.exportCsv(
+        outputDirectory: tempDir.path,
+        session: session,
+        colonies: [withPhoto, colony(trackId: 4)],
+      );
+
+      final rows = const CsvToListConverter(shouldParseNumbers: false)
+          .convert(File(path).readAsStringSync());
+      String cell(int row, String header) =>
+          rows[row][ReportExporter.csvHeaders.indexOf(header)] as String;
+      expect(cell(1, 'Photo Path'), 'colony_photos/session1_track3.jpg');
+      expect(cell(1, 'Photo Crop Path'), 'colony_photos/session1_track3_crop.jpg');
+      expect(cell(1, 'Photo Label'), 'CORAL_BL');
+      expect(cell(1, 'Photo Confidence'), '0.88');
+      for (final header in ['Photo Path', 'Photo Crop Path', 'Photo Label', 'Photo Confidence']) {
+        expect(cell(2, header), '');
+      }
+    });
+
     test('filename is scoped by site name and session start time', () async {
       final path = await ReportExporter.exportCsv(
         outputDirectory: tempDir.path,

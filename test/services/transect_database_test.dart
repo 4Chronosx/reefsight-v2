@@ -6,7 +6,7 @@ import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
-import 'package:sqflite/sqflite.dart' show openDatabase;
+import 'package:sqflite/sqflite.dart' show Database, openDatabase;
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -401,6 +401,7 @@ void main() {
         version: 4,
         singleInstance: false,
         onCreate: (db, version) async {
+          await _createPreV9ColoniesTable(db);
           await db.execute('''
             CREATE TABLE transect_sessions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -493,6 +494,7 @@ void main() {
         version: 5,
         singleInstance: false,
         onCreate: (db, version) async {
+          await _createPreV9ColoniesTable(db);
           await db.execute('''
             CREATE TABLE transect_sessions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -630,6 +632,7 @@ void main() {
         version: 6,
         singleInstance: false,
         onCreate: (db, version) async {
+          await _createPreV9ColoniesTable(db);
           await db.execute('''
             CREATE TABLE transect_sessions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -839,6 +842,7 @@ void main() {
         version: 7,
         singleInstance: false,
         onCreate: (db, version) async {
+          await _createPreV9ColoniesTable(db);
           await db.execute('''
             CREATE TABLE transect_sessions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -908,4 +912,103 @@ void main() {
       expect((await db.sessionById(id))!.videoStartedAt, videoStart);
     });
   });
+
+  group('TransectDatabase schema v9', () {
+    test('upgrading a v8 file keeps colony rows; the photo columns read back null', () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v8_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // The v8 colonies table exactly as `_createSchema` wrote it before v9.
+      final v8 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 8,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE tracked_colonies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id INTEGER NOT NULL,
+              track_id INTEGER NOT NULL,
+              species TEXT,
+              species_confidence REAL,
+              health_label TEXT,
+              health_history TEXT NOT NULL,
+              size_px REAL,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              mask_path TEXT,
+              UNIQUE(session_id, track_id)
+            )
+          ''');
+        },
+      );
+      await v8.insert('tracked_colonies', {
+        'session_id': 1,
+        'track_id': 4,
+        'health_label': 'CORAL',
+        'health_history': '[]',
+        'first_seen_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'last_seen_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+      });
+      await v8.close();
+
+      final db = await TransectDatabase.open(dir.path);
+      addTearDown(db.close);
+
+      final colony = (await db.colonyRowsForSession(1)).single;
+      expect(colony.healthLabel, 'CORAL');
+      expect(colony.photoPath, isNull);
+      expect(colony.photoCropPath, isNull);
+      expect(colony.photoLabel, isNull);
+      expect(colony.photoConfidence, isNull);
+    });
+
+    test('upsertColonies stores and reads back the photo columns', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+      );
+
+      await db.upsertColonies([
+        TrackedColonyRecord(
+          sessionId: sessionId,
+          trackId: 9,
+          healthHistory: const [],
+          firstSeenAt: DateTime.utc(2026, 1, 1),
+          lastSeenAt: DateTime.utc(2026, 1, 1),
+          photoPath: 'colony_photos/session2_track9.jpg',
+          photoCropPath: 'colony_photos/session2_track9_crop.jpg',
+          photoLabel: 'CORAL_BL',
+          photoConfidence: 0.91,
+        ),
+      ]);
+
+      final colony = (await db.colonyRowsForSession(sessionId)).single;
+      expect(colony.photoPath, 'colony_photos/session2_track9.jpg');
+      expect(colony.photoCropPath, 'colony_photos/session2_track9_crop.jpg');
+      expect(colony.photoLabel, 'CORAL_BL');
+      expect(colony.photoConfidence, 0.91);
+    });
+  });
 }
+
+/// Every real database has had `tracked_colonies` since v1; the older
+/// migration fixtures above build only the table their version changed, so
+/// v9's colony `ALTER`s need this one too. Its shape before v9.
+Future<void> _createPreV9ColoniesTable(Database db) => db.execute('''
+  CREATE TABLE tracked_colonies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    species TEXT,
+    species_confidence REAL,
+    health_label TEXT,
+    health_history TEXT NOT NULL,
+    size_px REAL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    mask_path TEXT,
+    UNIQUE(session_id, track_id)
+  )
+''');

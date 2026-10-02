@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show FileSystemException;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +27,8 @@ void main() {
     double? sizePx,
     String? maskPath,
     List<HealthHistorySample> history = const [],
+    String? photoPath,
+    double? photoConfidence,
   }) {
     return TrackedColonyRecord(
       sessionId: sessionId,
@@ -35,14 +38,21 @@ void main() {
       firstSeenAt: DateTime.utc(2026, 10, 1, 9),
       lastSeenAt: lastSeenAt ?? DateTime.utc(2026, 10, 1, 9),
       maskPath: maskPath,
+      photoPath: photoPath,
+      photoLabel: photoPath == null ? null : 'CORAL_BL',
+      photoConfidence: photoConfidence,
     );
   }
 
-  SessionCheckpointer checkpointer({void Function(Object)? onFailure}) {
+  SessionCheckpointer checkpointer({
+    void Function(Object)? onFailure,
+    Future<void> Function()? beforeSnapshot,
+  }) {
     return SessionCheckpointer(
       db: db,
       sessionId: sessionId,
       snapshot: () => live.values.toList(),
+      beforeSnapshot: beforeSnapshot,
       now: () => clock,
       onFailure: onFailure,
     );
@@ -331,6 +341,59 @@ void main() {
       await cp.recordThermal(ThermalLevel.critical, 1);
 
       expect((await db.sessionById(sessionId))!.thermalPeak, isNull);
+    });
+  });
+
+  // Sub-plan 18 step 3: colony photos are written at each checkpoint, just
+  // before the snapshot, so the rows can carry their paths.
+  group('SessionCheckpointer photos', () {
+    test('beforeSnapshot runs inside each checkpoint, before the snapshot', () async {
+      final order = <String>[];
+      final cp = SessionCheckpointer(
+        db: db,
+        sessionId: sessionId,
+        snapshot: () {
+          order.add('snapshot');
+          return live.values.toList();
+        },
+        beforeSnapshot: () async => order.add('photos'),
+        now: () => clock,
+      );
+
+      await cp.checkpoint();
+      await cp.checkpoint();
+
+      expect(order, ['photos', 'snapshot', 'photos', 'snapshot']);
+    });
+
+    test('a new or better photo counts as a change', () async {
+      final cp = checkpointer();
+      live[1] = record(1);
+      await cp.checkpoint();
+
+      live[1] = record(1, photoPath: 'colony_photos/session1_track1.jpg', photoConfidence: 0.8);
+      await cp.checkpoint();
+      expect((await rowsByTrack())[1]!.photoConfidence, 0.8);
+
+      // Same path (the file was overwritten), better sample.
+      live[1] = record(1, photoPath: 'colony_photos/session1_track1.jpg', photoConfidence: 0.9);
+      await cp.checkpoint();
+      expect((await rowsByTrack())[1]!.photoConfidence, 0.9);
+    });
+
+    test('a failed photo write is counted, and the rows are still written', () async {
+      final failures = <Object>[];
+      final cp = checkpointer(
+        onFailure: failures.add,
+        beforeSnapshot: () async => throw const FileSystemException('disk full'),
+      );
+      live[1] = record(1);
+
+      await cp.checkpoint();
+
+      expect(cp.failureCount, 1);
+      expect(failures.single, isA<FileSystemException>());
+      expect((await rowsByTrack()).keys, [1]);
     });
   });
 }

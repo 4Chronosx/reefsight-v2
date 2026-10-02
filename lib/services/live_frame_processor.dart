@@ -103,8 +103,9 @@ class LiveFrameProcessor {
   final void Function(List<STrack> tracks) onTracks;
 
   /// Called with each classification result, by track id, timestamped with
-  /// the frame it was sampled from.
-  final void Function(int trackId, ColonyHealth health, DateTime sampledAt)
+  /// the frame it was sampled from. Carries the crop and context photo it
+  /// came from (sub-plan 18).
+  final void Function(int trackId, ClassifiedCrop result, DateTime sampledAt)
   onHealth;
 
   final LiveLoopMetrics? metrics;
@@ -191,7 +192,11 @@ class LiveFrameProcessor {
         continue;
       }
       candidates.add(
-        ClassificationCandidate(trackId: track.trackId, box: crop.window),
+        ClassificationCandidate(
+          trackId: track.trackId,
+          box: crop.window,
+          contextBox: payload.box,
+        ),
       );
     }
     return candidates;
@@ -201,7 +206,7 @@ class LiveFrameProcessor {
     List<TrackerDetection> detections,
     ({Uint8List bytes, int width, int height}) frame,
   ) async {
-    final healthByPayload = <LiveDetectionPayload, ColonyHealth>{};
+    final healthByPayload = <LiveDetectionPayload, ClassifiedCrop>{};
     for (final detection in detections) {
       final payload = detection.payload! as LiveDetectionPayload;
       final startedAt = _now();
@@ -211,6 +216,7 @@ class LiveFrameProcessor {
           [payload.box],
           frameWidth: frame.width,
           frameHeight: frame.height,
+          contextBoxes: [payload.box],
         );
         final health = results.isEmpty ? null : results.first;
         if (health != null) healthByPayload[payload] = health;

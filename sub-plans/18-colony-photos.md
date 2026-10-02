@@ -62,3 +62,30 @@ mask PNG, which isn't viewable as a photo.
 - After a device transect, Summary shows a photo for every classified colony, and the executive tab shows
   the bleached ones.
 - The photos survive reinstall-style path changes and appear in the CSV.
+
+## Implementation notes (2026-10-03)
+Built as planned, with these deviations. The reasoning is in `docs/colony-photos-capture-and-storage.md`.
+- **Best photo per label, not per colony** (code-review finding). A colony's label is a weighted
+  average, so its single most confident sample can carry the other label. Keeping the best of each label
+  and storing the one that matches the colony's final label keeps a healthy-looking photo out of
+  "Bleached colonies". Files are named `session{S}_track{T}_{label}.jpg`.
+- **Four columns, not two** (schema v9): `photo_path`, `photo_crop_path`, plus `photo_label` and
+  `photo_confidence`. These record the sample the photo shows. Re-deriving them from `health_history`
+  could pick a different sample (a tie, or a sample whose photo failed to encode), so the label shown
+  could disagree with the image, and ML sub-plan 2 needs each crop paired with its own label.
+- **Result type:** `classifyBatch` returns `List<ClassifiedCrop?>` (a non-null `health` plus optional
+  `crop`/`context`) rather than a record with a nullable health. A crop with no label is useless here,
+  so an unclassified box is still just `null`.
+- **Context box:** each `ClassificationCandidate` also carries `contextBox` (the detection box), because
+  its `box` is the classifier crop window (sub-plan 10), not the detection.
+- **Memory:** image bytes are held only until written. After that, only each track's rank
+  (confident, confidence) is kept.
+- **Checkpoint writes:** `SessionCheckpointer.beforeSnapshot` writes changed photos inside the write
+  queue, before the snapshot. A failed photo write is counted like any checkpoint failure, and the rows
+  are still written. Finalize flushes once more after the live loop is closed.
+- **Sharing:** "Share report with photos" is a second button next to "Export & Share CSV", shown only
+  when photos exist. It shares the context photos only, as a list (no zip package is a dependency).
+- **Staged writes:** both images go to temp files before either is renamed, so a failed write leaves
+  the previous photo intact.
+- **Executive strip:** bleached colonies without a photo (sessions from before this change) are
+  counted under the strip ("N bleached colonies have no photo.").

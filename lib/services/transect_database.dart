@@ -36,8 +36,9 @@ class TransectDatabase {
   /// peak and rise count (sub-plan 13: pre-dive checks). 5 -> 6 added the
   /// entry/exit GPS fix columns (sub-plan 12). 6 -> 7 added the hidden-
   /// results and manual recount columns (sub-plan 14). 7 -> 8 added
-  /// `video_started_at` (sub-plan 16: colony video jump).
-  static const _schemaVersion = 8;
+  /// `video_started_at` (sub-plan 16: colony video jump). 8 -> 9 added the
+  /// colony photo columns to `tracked_colonies` (sub-plan 18).
+  static const _schemaVersion = 9;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -115,6 +116,7 @@ class TransectDatabase {
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
         mask_path TEXT,
+        ${_photoColumns.join(',\n        ')},
         UNIQUE(session_id, track_id)
       )
     ''');
@@ -126,7 +128,7 @@ class TransectDatabase {
   /// added `thermal_peak`/`thermal_rise_count`, 5 -> 6 added the
   /// `entry_*`/`exit_*` GPS fix columns, 6 -> 7 added `results_hidden`,
   /// `results_revealed_at` and the `recount_*` columns, 7 -> 8 added
-  /// `video_started_at`.
+  /// `video_started_at`, 8 -> 9 added the `photo_*` colony columns.
   /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
   /// read back as `null`, matching `TransectSession.fromMap`'s
   /// already-nullable handling of every added column).
@@ -167,7 +169,21 @@ class TransectDatabase {
     if (oldVersion < 8) {
       await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN video_started_at TEXT');
     }
+    if (oldVersion < 9) {
+      for (final column in _photoColumns) {
+        await db.execute('ALTER TABLE $_coloniesTable ADD COLUMN $column');
+      }
+    }
   }
+
+  /// Sub-plan 18's columns -- names match `TrackedColonyRecord.toMap`.
+  /// Paths are relative to the documents directory.
+  static const _photoColumns = [
+    'photo_path TEXT',
+    'photo_crop_path TEXT',
+    'photo_label TEXT',
+    'photo_confidence REAL',
+  ];
 
   /// Sub-plan 14's columns -- names match `TransectSession.toMap` and
   /// `Recount.toColumns`. Flags are 0/1, times ISO-8601 UTC.

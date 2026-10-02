@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/colony_photos.dart';
 import '../services/device_checks.dart';
 import '../services/geo_fix.dart';
 import '../services/geo_fix_controller.dart';
@@ -16,6 +17,7 @@ import '../services/report_exporter.dart';
 import '../services/tracked_colony_record.dart';
 import '../services/transect_session.dart';
 import '../services/transect_video.dart';
+import '../widgets/colony_photo_views.dart';
 import '../widgets/geo_fix_panel.dart';
 import '../widgets/health_chip.dart';
 import 'app_shell.dart';
@@ -36,6 +38,7 @@ class SummaryScreen extends StatefulWidget {
     this.openDatabase = openAppDatabase,
     this.locationProvider = const GeolocatorLocationProvider(),
     this.resolveVideo = resolveTransectVideo,
+    this.resolvePhotos = _resolvePhotosInDocuments,
   });
 
   final int sessionId;
@@ -53,8 +56,18 @@ class SummaryScreen extends StatefulWidget {
   /// a video (sub-plan 16's colony play buttons).
   final Future<File?> Function(String? storedPath) resolveVideo;
 
+  /// Sub-plan 18: finds the colonies' photos under the current documents
+  /// directory. Injectable for the same reason as [resolveVideo].
+  final Future<ColonyPhotoFiles> Function(List<TrackedColonyRecord> colonies)
+  resolvePhotos;
+
   @override
   State<SummaryScreen> createState() => _SummaryScreenState();
+}
+
+Future<ColonyPhotoFiles> _resolvePhotosInDocuments(List<TrackedColonyRecord> colonies) async {
+  final documentsDir = await getApplicationDocumentsDirectory();
+  return resolveColonyPhotos(colonies, documentsDirectory: documentsDir.path);
 }
 
 class _SummaryScreenState extends State<SummaryScreen> {
@@ -73,6 +86,10 @@ class _SummaryScreenState extends State<SummaryScreen> {
   /// isn't trusted). `null` means no playable video for this session.
   File? _videoFile;
 
+  /// Sub-plan 18: the colony photos that exist on disk, resolved alongside
+  /// the report like [_videoFile].
+  ColonyPhotoFiles _photos = ColonyPhotoFiles.empty;
+
   Future<TransectReport> _loadReport() async {
     final db = await widget.openDatabase();
     try {
@@ -87,6 +104,11 @@ class _SummaryScreenState extends State<SummaryScreen> {
         // A video lookup failure (e.g. no path_provider under tests) must
         // not take the whole report down with it.
         debugPrint('ReefSight: failed to resolve transect video: $error');
+      }
+      try {
+        _photos = await widget.resolvePhotos(colonies);
+      } catch (error) {
+        debugPrint('ReefSight: failed to resolve colony photos: $error');
       }
       return TransectReport(session: session, colonies: colonies);
     } finally {
@@ -159,6 +181,7 @@ class _SummaryScreenState extends State<SummaryScreen> {
             return _ReportBody(
               report: report,
               videoFile: _videoFile,
+              photos: _photos,
               exitFix: exitFix,
               openDatabase: widget.openDatabase,
               onRecountSaved: _reload,
@@ -177,6 +200,7 @@ class _ReportBody extends StatelessWidget {
   const _ReportBody({
     required this.report,
     this.videoFile,
+    this.photos = ColonyPhotoFiles.empty,
     this.exitFix,
     required this.openDatabase,
     required this.onRecountSaved,
@@ -184,6 +208,7 @@ class _ReportBody extends StatelessWidget {
 
   final TransectReport report;
   final File? videoFile;
+  final ColonyPhotoFiles photos;
 
   /// Sub-plan 12: the "Record exit position" section, only while the
   /// session has no exit fix.
@@ -202,6 +227,7 @@ class _ReportBody extends StatelessWidget {
           child: _ReportTabs(
             report: report,
             videoFile: videoFile,
+            photos: photos,
             openDatabase: openDatabase,
             onRecountSaved: onRecountSaved,
           ),
@@ -822,12 +848,14 @@ class _ReportTabs extends StatelessWidget {
   const _ReportTabs({
     required this.report,
     this.videoFile,
+    required this.photos,
     required this.openDatabase,
     required this.onRecountSaved,
   });
 
   final TransectReport report;
   final File? videoFile;
+  final ColonyPhotoFiles photos;
   final DatabaseOpener openDatabase;
   final VoidCallback onRecountSaved;
 
@@ -849,10 +877,11 @@ class _ReportTabs extends StatelessWidget {
           Expanded(
             child: TabBarView(
               children: [
-                _ExecutiveTab(report: report),
+                _ExecutiveTab(report: report, photos: photos),
                 _TechnicalTab(
                   report: report,
                   videoFile: videoFile,
+                  photos: photos,
                   openDatabase: openDatabase,
                   onRecountSaved: onRecountSaved,
                 ),
@@ -871,9 +900,10 @@ class _ReportTabs extends StatelessWidget {
 /// unchanged from sub-plan 5 -- Spec line 125 marks this tab `[OPEN]`, and
 /// this sub-plan restyles what exists rather than inventing new content.
 class _ExecutiveTab extends StatelessWidget {
-  const _ExecutiveTab({required this.report});
+  const _ExecutiveTab({required this.report, required this.photos});
 
   final TransectReport report;
+  final ColonyPhotoFiles photos;
 
   @override
   Widget build(BuildContext context) {
@@ -967,6 +997,12 @@ class _ExecutiveTab extends StatelessWidget {
           'Density: ${report.executiveDensityLine}',
           style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
         ),
+        const SizedBox(height: 24),
+        BleachedColonyStrip(
+          colonies: report.colonies,
+          photos: photos,
+          prevalenceReliable: report.prevalenceReliable,
+        ),
       ],
     );
   }
@@ -1009,6 +1045,7 @@ class _TechnicalTab extends StatefulWidget {
   const _TechnicalTab({
     required this.report,
     this.videoFile,
+    required this.photos,
     required this.openDatabase,
     required this.onRecountSaved,
   });
@@ -1020,6 +1057,9 @@ class _TechnicalTab extends StatefulWidget {
   /// Already resolved to an existing file (or `null`) by
   /// `_SummaryScreenState._loadReport`.
   final File? videoFile;
+
+  /// Sub-plan 18: row thumbnails and "Share report with photos".
+  final ColonyPhotoFiles photos;
 
   @override
   State<_TechnicalTab> createState() => _TechnicalTabState();
@@ -1058,7 +1098,9 @@ class _TechnicalTabState extends State<_TechnicalTab> {
     }
   }
 
-  Future<void> _exportAndShare() async {
+  /// Sub-plan 18 step 6: [withPhotos] adds every colony photo on disk to the
+  /// shared files, as a plain list (no zip dependency).
+  Future<void> _exportAndShare({bool withPhotos = false}) async {
     setState(() {
       _isExporting = true;
       _exportError = null;
@@ -1082,7 +1124,14 @@ class _TechnicalTabState extends State<_TechnicalTab> {
         _csvPath = path;
         _isExporting = false;
       });
-      await ReportExporter.shareCsv([path, sessionPath]);
+      if (withPhotos) {
+        await ReportExporter.shareReportWithPhotos(
+          [path, sessionPath],
+          widget.photos.contextPaths,
+        );
+      } else {
+        await ReportExporter.shareCsv([path, sessionPath]);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -1159,6 +1208,8 @@ class _TechnicalTabState extends State<_TechnicalTab> {
             colony: colony,
             session: report.session,
             videoFile: widget.videoFile,
+            photo: widget.photos.context[colony.trackId],
+            crop: widget.photos.crop[colony.trackId],
           ),
         ),
         const SizedBox(height: 20),
@@ -1176,6 +1227,18 @@ class _TechnicalTabState extends State<_TechnicalTab> {
             label: Text(_isExporting ? 'Exporting...' : 'Export & Share CSV'),
           ),
         ),
+        if (widget.photos.contextPaths.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: SizedBox(
+              height: 52,
+              child: OutlinedButton.icon(
+                onPressed: _isExporting ? null : () => _exportAndShare(withPhotos: true),
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('Share report with photos'),
+              ),
+            ),
+          ),
         if (_csvPath != null)
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -1444,11 +1507,18 @@ class _ColonyDetailRow extends StatelessWidget {
     required this.colony,
     required this.session,
     this.videoFile,
+    this.photo,
+    this.crop,
   });
 
   final TrackedColonyRecord colony;
   final TransectSession session;
   final File? videoFile;
+
+  /// Sub-plan 18: the colony's context photo and classifier crop, when on
+  /// disk. With a photo the row shows it instead of the mask.
+  final File? photo;
+  final File? crop;
 
   void _openVideo(BuildContext context, File video) {
     final offset = videoOffsetFor(colony, session);
@@ -1472,6 +1542,7 @@ class _ColonyDetailRow extends StatelessWidget {
     final video = videoFile;
     final color = AppColors.forHealth(colony.healthLabel);
     final maskPath = colony.maskPath;
+    final photo = this.photo;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -1483,7 +1554,9 @@ class _ColonyDetailRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          if (maskPath != null)
+          if (photo != null)
+            ColonyThumbnail(colony: colony, photo: photo, crop: crop)
+          else if (maskPath != null)
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: Image.file(

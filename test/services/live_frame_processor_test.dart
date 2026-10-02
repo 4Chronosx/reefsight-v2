@@ -39,7 +39,7 @@ Map<String, dynamic> _event(List<Map<String, dynamic>> detections) => {
   'imageHeight': 480,
 };
 
-const _healthy = ColonyHealth(label: 'CORAL', confidence: 0.9);
+const _healthy = ClassifiedCrop(health: ColonyHealth(label: 'CORAL', confidence: 0.9));
 
 /// Records every batch and answers immediately (or never, if [hang]).
 class _FakeClassifier {
@@ -47,15 +47,18 @@ class _FakeClassifier {
 
   final bool hang;
   final calls = <List<Rect>>[];
+  final contextCalls = <List<Rect?>?>[];
 
-  Future<List<ColonyHealth?>> call(
+  Future<List<ClassifiedCrop?>> call(
     Uint8List frameBytes,
     List<Rect> boxes, {
     required int frameWidth,
     required int frameHeight,
+    List<Rect?>? contextBoxes,
   }) {
     calls.add(boxes);
-    if (hang) return Completer<List<ColonyHealth?>>().future;
+    contextCalls.add(contextBoxes);
+    if (hang) return Completer<List<ClassifiedCrop?>>().future;
     return Future.value([for (final _ in boxes) _healthy]);
   }
 }
@@ -210,7 +213,7 @@ void main() {
     });
 
     test('results reach onHealth under the classified track\'s id', () async {
-      final health = <(int, ColonyHealth)>[];
+      final health = <(int, ClassifiedCrop)>[];
       final tracker = BoTSortTracker();
       final processor = LiveFrameProcessor(
         tracker: tracker,
@@ -224,6 +227,24 @@ void main() {
       await pumpEventQueue();
 
       expect(health, [(tracker.tracks.single.trackId, _healthy)]);
+    });
+
+    // Sub-plan 18 step 1: the context photo is cut around the detection box
+    // itself, not the classifier's crop window.
+    test('offers the detection box as each candidate\'s context box', () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+
+      expect(fake.contextCalls.single, [const Rect.fromLTRB(100, 100, 140, 140)]);
     });
 
     test('after close, events are ignored', () async {
@@ -434,6 +455,7 @@ void main() {
 
       expect(fake.calls, hasLength(2));
       expect(fake.calls.every((boxes) => boxes.length == 1), isTrue);
+      expect(fake.contextCalls, [for (final boxes in fake.calls) boxes]);
       expect(health.toSet(), tracker.tracks.map((t) => t.trackId).toSet());
     });
 
@@ -471,11 +493,12 @@ void main() {
       DateTime now() =>
           DateTime.utc(2026, 10, 1).add(Duration(milliseconds: clockMs));
 
-      Future<List<ColonyHealth?>> slowClassify(
+      Future<List<ClassifiedCrop?>> slowClassify(
         Uint8List frameBytes,
         List<Rect> boxes, {
         required int frameWidth,
         required int frameHeight,
+        List<Rect?>? contextBoxes,
       }) => Future.delayed(
         Duration(milliseconds: 60 * boxes.length),
         () => [for (final _ in boxes) _healthy],

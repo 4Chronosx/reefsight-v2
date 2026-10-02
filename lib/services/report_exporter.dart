@@ -34,6 +34,11 @@ class ReportExporter {
     'First Seen At',
     'Last Seen At',
     'Mask Path',
+    // Sub-plan 18: relative to the app's documents directory, as stored.
+    'Photo Path',
+    'Photo Crop Path',
+    'Photo Label',
+    'Photo Confidence',
   ];
 
   static List<dynamic> _csvRow(TrackedColonyRecord colony) => [
@@ -45,6 +50,10 @@ class ReportExporter {
         colony.firstSeenAt.toIso8601String(),
         colony.lastSeenAt.toIso8601String(),
         colony.maskPath ?? '',
+        colony.photoPath ?? '',
+        colony.photoCropPath ?? '',
+        colony.photoLabel ?? '',
+        colony.photoConfidence?.toStringAsFixed(2) ?? '',
       ];
 
   /// Whitelists `[A-Za-z0-9_-]`, replacing everything else (including
@@ -302,6 +311,19 @@ class ReportExporter {
       [for (final path in filePaths) XFile(path)],
       subject: 'ReefSight Transect Report',
       text: 'Coral reef health survey report from ReefSight.',
+    );
+  }
+
+  /// Sub-plan 18 step 6: the CSVs plus the colony photo files, as one list
+  /// of files -- no zip package is a dependency, so none is added for this.
+  static Future<void> shareReportWithPhotos(
+    List<String> csvPaths,
+    List<String> photoPaths,
+  ) async {
+    await Share.shareXFiles(
+      [for (final path in [...csvPaths, ...photoPaths]) XFile(path)],
+      subject: 'ReefSight Transect Report',
+      text: 'Coral reef health survey report from ReefSight, with colony photos.',
     );
   }
 

@@ -8,6 +8,7 @@ import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 import '../services/app_settings.dart';
 import '../services/bleaching_classifier.dart';
+import '../services/colony_photos.dart';
 import '../services/colony_size.dart';
 import '../services/device_health_monitor.dart';
 import '../services/device_info.dart';
@@ -132,6 +133,12 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   final Map<int, DateTime> _firstSeenAt = {};
   final Map<int, DateTime> _lastSeenAt = {};
   final Map<int, List<List<double>>> _latestMasks = {};
+
+  // Sub-plan 18: each track's best photo so far, written by [_photoStore]
+  // at every checkpoint and at finalize. The store exists once the session
+  // does.
+  final BestColonyPhoto _bestPhotos = BestColonyPhoto();
+  ColonyPhotoStore? _photoStore;
   String? _persistError;
 
   // Sub-plan 11 (live session safety). The checkpointer is created once
@@ -276,12 +283,18 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       );
       _db = db;
       _sessionId = sessionId;
+      final photoStore = ColonyPhotoStore(
+        documentsDirectory: documentsDir.path,
+        sessionId: sessionId,
+      );
+      _photoStore = photoStore;
       _checkpointer = SessionCheckpointer(
         db: db,
         sessionId: sessionId,
         snapshot: () => [
           for (final trackId in _firstSeenAt.keys) _colonyRecord(sessionId, trackId),
         ],
+        beforeSnapshot: () => photoStore.flush(_bestPhotos),
         onFailure: (_) {
           if (mounted) setState(() {});
         },
@@ -390,15 +403,23 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     int trackId, {
     String? maskPath,
   }) {
+    final healthLabel = _healthAggregator.currentLabel(trackId);
+    // The photo matching the colony's own label (sub-plan 18 review), so a
+    // bleached colony never shows its healthy-looking sample.
+    final photo = _photoStore?.photoFor(trackId, label: healthLabel);
     return TrackedColonyRecord(
       sessionId: sessionId,
       trackId: trackId,
-      healthLabel: _healthAggregator.currentLabel(trackId),
+      healthLabel: healthLabel,
       healthHistory: _healthHistoryRecorder.samplesFor(trackId),
       sizePx: _latestSizePx[trackId],
       firstSeenAt: _firstSeenAt[trackId]!,
       lastSeenAt: _lastSeenAt[trackId]!,
       maskPath: maskPath,
+      photoPath: photo?.path,
+      photoCropPath: photo?.cropPath,
+      photoLabel: photo?.label,
+      photoConfidence: photo?.confidence,
     );
   }
 
@@ -413,6 +434,14 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     if (db == null || sessionId == null) return;
 
     try {
+      try {
+        // After the loop is closed, so nothing new can land. (Like health
+        // samples, a batch still in flight at End Transect is dropped.)
+        await _photoStore?.flush(_bestPhotos);
+      } catch (error) {
+        // Rows still carry the photos that were written; the rest are lost.
+        debugPrint('ReefSight: final colony photo write failed: $error');
+      }
       final documentsDir = await getApplicationDocumentsDirectory();
       final records = <TrackedColonyRecord>[];
       // A snapshot: streaming events keep arriving while this loop awaits
@@ -633,8 +662,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   /// result, keyed by the track it was sampled from. Results are kept even
   /// if that track has since been lost or removed -- finalize persists every
   /// track ever seen -- and dropped only once the session is finalized.
-  void _handleHealth(int trackId, ColonyHealth health, DateTime sampledAt) {
+  void _handleHealth(int trackId, ClassifiedCrop result, DateTime sampledAt) {
     if (_finalized || !mounted) return;
+    final health = result.health;
+    _bestPhotos.offer(trackId, result);
     setState(() {
       _healthAggregator.record(trackId, health);
       _healthHistoryRecorder.record(trackId, health, sampledAt.toUtc());

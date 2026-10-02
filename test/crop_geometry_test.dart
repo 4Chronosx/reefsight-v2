@@ -296,4 +296,34 @@ void main() {
       }
     });
   });
+
+  // Sub-plan 18 decision 1: the context photo is the detection box grown
+  // x1.5 about its centre, clamped to the frame.
+  group('computeContextRegion', () {
+    test('grows the box x1.5 about its centre', () {
+      final region = computeContextRegion(
+        const Rect.fromLTWH(100, 100, 40, 20),
+        frameWidth: 640,
+        frameHeight: 480,
+      );
+
+      expect(region.left, 90);
+      expect(region.top, 95);
+      expect(region.width, 60);
+      expect(region.height, 30);
+    });
+
+    test('clamps the grown box to the frame', () {
+      final region = computeContextRegion(
+        const Rect.fromLTWH(0, 440, 100, 40),
+        frameWidth: 640,
+        frameHeight: 480,
+      );
+
+      expect(region.left, 0);
+      expect(region.top, 430);
+      expect(region.left + region.width, lessThanOrEqualTo(640));
+      expect(region.top + region.height, 480);
+    });
+  });
 }

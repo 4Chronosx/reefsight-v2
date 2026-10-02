@@ -8,21 +8,31 @@ import 'bleaching_classifier.dart';
 /// A confirmed, currently-tracked colony that could be classified this
 /// frame: its track id and the box it was detected at *in this frame*.
 class ClassificationCandidate {
-  const ClassificationCandidate({required this.trackId, required this.box});
+  const ClassificationCandidate({
+    required this.trackId,
+    required this.box,
+    this.contextBox,
+  });
 
   final int trackId;
   final Rect box;
+
+  /// The detection box its context photo is cut around (sub-plan 18),
+  /// `null` for no photo.
+  final Rect? contextBox;
 }
 
 /// Classifies every box in [boxes] against one frame -- see
 /// [BleachingClassifier.classifyBatch]. One result per box, `null` where
-/// that box couldn't be classified.
+/// that box couldn't be classified. [contextBoxes] is parallel to [boxes]
+/// (sub-plan 18).
 typedef BatchClassify =
-    Future<List<ColonyHealth?>> Function(
+    Future<List<ClassifiedCrop?>> Function(
       Uint8List frameBytes,
       List<Rect> boxes, {
       required int frameWidth,
       required int frameHeight,
+      List<Rect?>? contextBoxes,
     });
 
 /// Decides which tracks get classified and when, off the tracker's critical
@@ -60,7 +70,7 @@ class ClassificationScheduler {
        _now = now ?? DateTime.now;
 
   final BatchClassify _classify;
-  final void Function(int trackId, ColonyHealth health, DateTime sampledAt)
+  final void Function(int trackId, ClassifiedCrop result, DateTime sampledAt)
   onResult;
   final Duration reclassifyEvery;
   final int maxPerFrame;
@@ -120,7 +130,7 @@ class ClassificationScheduler {
     final due = selectDue(candidates, sampledAt);
     if (due.isEmpty) return false;
 
-    final boxById = {for (final c in candidates) c.trackId: c.box};
+    final byId = {for (final c in candidates) c.trackId: c};
     for (final id in due) {
       _lastAttemptAt[id] = sampledAt;
     }
@@ -128,7 +138,8 @@ class ClassificationScheduler {
     _inFlight = _runBatch(
       frameBytes,
       due,
-      [for (final id in due) boxById[id]!],
+      [for (final id in due) byId[id]!.box],
+      [for (final id in due) byId[id]!.contextBox],
       frameWidth: frameWidth,
       frameHeight: frameHeight,
       sampledAt: sampledAt,
@@ -139,19 +150,21 @@ class ClassificationScheduler {
   Future<void> _runBatch(
     Uint8List frameBytes,
     List<int> trackIds,
-    List<Rect> boxes, {
+    List<Rect> boxes,
+    List<Rect?> contextBoxes, {
     required int frameWidth,
     required int frameHeight,
     required DateTime sampledAt,
   }) async {
     final startedAt = _now();
-    List<ColonyHealth?> results;
+    List<ClassifiedCrop?> results;
     try {
       results = await _classify(
         frameBytes,
         boxes,
         frameWidth: frameWidth,
         frameHeight: frameHeight,
+        contextBoxes: contextBoxes,
       );
     } catch (error) {
       debugPrint('ReefSight: classification batch failed: $error');
@@ -171,8 +184,8 @@ class ClassificationScheduler {
       if (_closed) return;
 
       for (var i = 0; i < trackIds.length && i < results.length; i++) {
-        final health = results[i];
-        if (health != null) onResult(trackIds[i], health, sampledAt);
+        final result = results[i];
+        if (result != null) onResult(trackIds[i], result, sampledAt);
       }
     } catch (error) {
       debugPrint('ReefSight: classification result handling failed: $error');

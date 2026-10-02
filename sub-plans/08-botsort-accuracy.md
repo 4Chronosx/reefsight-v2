@@ -49,6 +49,12 @@ measurement is guessing.**
      8 Hz (`inferenceFrequency: 8`), so 30 updates is **~3.75 s** of lost-track memory, not the ~1 s
      it means on 30 fps MOT17 video.
    - **Status:** nobody has chosen these values for this domain.
+   - **`trackLowThresh 0.1` has no effect in the app (found 2026-10-02).** `live_transect_screen.dart`
+     never sets the `YOLOViewController` confidence threshold, so the plugin's default **0.25**
+     (`third_party/ultralytics_yolo/lib/widgets/yolo_controller.dart`) drops every detection below 0.25
+     before the tracker sees it. The second-association band is really 0.25–0.6. The sweep must either
+     model that floor (feed `track_eval.dart` only detections ≥ the app's cutoff) or treat the plugin
+     cutoff as a parameter and set it explicitly in the app if a lower value wins.
 3. **Every track counts toward the total, however brief.** A detection that flickers for one or two
    frames becomes a track ID, is persisted by `_finalizeSession()`, and counts toward density.
 4. **No real-video tracking evaluation exists.** Four synthetic fixtures verify parity, not quality.
@@ -149,6 +155,9 @@ against.
     but they don't set the values: tracking is evaluated on CoralVOS sequences.
   - If the shipped detector changes again (e.g. v4), redo this from the new 24c run's rows for that model.
     Thresholds tuned for one model's scores don't transfer to another.
+  - **Decided 2026-10-03:** start 08 on `coralscapes_v3` now rather than waiting for v4's benchmark. The
+    harness (01, `track_eval.dart`, 03) is model-independent. If v4 ships, re-run 02 and the sweep on v4's
+    detections. **The final thresholds must come from the detector that actually ships.**
 - Then run a bounded sweep on the tuning set with `track_eval.dart`:
   - `trackHighThresh`, `trackLowThresh`, `newTrackThresh`
   - `matchThresh`

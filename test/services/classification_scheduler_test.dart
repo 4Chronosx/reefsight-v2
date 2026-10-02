@@ -23,22 +23,25 @@ ClassificationCandidate _c(int id) => ClassificationCandidate(
 /// A classifier whose batches complete only when the test says so.
 class _FakeClassifier {
   final calls = <List<Rect>>[];
-  final _pending = <Completer<List<ColonyHealth?>>>[];
+  final contextCalls = <List<Rect?>?>[];
+  final _pending = <Completer<List<ClassifiedCrop?>>>[];
 
-  Future<List<ColonyHealth?>> call(
+  Future<List<ClassifiedCrop?>> call(
     Uint8List frameBytes,
     List<Rect> boxes, {
     required int frameWidth,
     required int frameHeight,
+    List<Rect?>? contextBoxes,
   }) {
     calls.add(boxes);
-    final completer = Completer<List<ColonyHealth?>>();
+    contextCalls.add(contextBoxes);
+    final completer = Completer<List<ClassifiedCrop?>>();
     _pending.add(completer);
     return completer.future;
   }
 
   /// Completes the oldest pending batch with one result per box.
-  Future<void> completeNext(List<ColonyHealth?> results) async {
+  Future<void> completeNext(List<ClassifiedCrop?> results) async {
     _pending.removeAt(0).complete(results);
     await pumpEventQueue();
   }
@@ -49,8 +52,10 @@ class _FakeClassifier {
   }
 }
 
-const _healthy = ColonyHealth(label: 'CORAL', confidence: 0.9);
-const _bleached = ColonyHealth(label: 'CORAL_BL', confidence: 0.8);
+const _healthy = ClassifiedCrop(health: ColonyHealth(label: 'CORAL', confidence: 0.9));
+const _bleached = ClassifiedCrop(
+  health: ColonyHealth(label: 'CORAL_BL', confidence: 0.8),
+);
 
 void main() {
   final frame = Uint8List.fromList([1, 2, 3]);
@@ -217,7 +222,7 @@ void main() {
     test('delivers each result to its own track id, at the frame time',
         () async {
       final fake = _FakeClassifier();
-      final results = <(int, ColonyHealth, DateTime)>[];
+      final results = <(int, ClassifiedCrop, DateTime)>[];
       final scheduler = ClassificationScheduler(
         classify: fake.call,
         onResult: (id, health, at) => results.add((id, health, at)),
@@ -234,6 +239,47 @@ void main() {
 
       expect(results, [(7, _bleached, _at(250)), (9, _healthy, _at(250))]);
       expect(scheduler.isBusy, isFalse);
+    });
+
+    // Sub-plan 18 step 1: each candidate's context box goes to the
+    // classifier alongside its crop box, and the images come back with the
+    // label, in the same order.
+    test('passes context boxes through and delivers the images', () async {
+      final fake = _FakeClassifier();
+      final results = <(int, ClassifiedCrop)>[];
+      final scheduler = ClassificationScheduler(
+        classify: fake.call,
+        onResult: (id, result, _) => results.add((id, result)),
+      );
+      const contextBox = Rect.fromLTWH(0, 0, 30, 30);
+      scheduler.offer(
+        frameBytes: frame,
+        frameWidth: 100,
+        frameHeight: 100,
+        candidates: [
+          const ClassificationCandidate(
+            trackId: 3,
+            box: Rect.fromLTWH(5, 5, 10, 10),
+            contextBox: contextBox,
+          ),
+          _c(4),
+        ],
+        sampledAt: _at(0),
+      );
+      expect(fake.contextCalls.single, [contextBox, null]);
+
+      final crop = Uint8List.fromList([1]);
+      final context = Uint8List.fromList([2]);
+      final withImages = ClassifiedCrop(
+        health: _bleached.health,
+        crop: crop,
+        context: context,
+      );
+      await fake.completeNext([withImages, _healthy]);
+
+      expect(results, [(3, withImages), (4, _healthy)]);
+      expect(results.first.$2.crop, same(crop));
+      expect(results.first.$2.context, same(context));
     });
 
     test('a null result is skipped and the track waits reclassifyEvery',

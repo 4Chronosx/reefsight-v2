@@ -148,5 +148,29 @@ void main() {
       final saved = buildRecord(id: 5);
       expect(saved.id, 5);
     });
+
+    // Sub-plan 18: the colony's photos (relative paths) and the label and
+    // confidence of the sample they show.
+    test('round-trips the photo columns, null by default', () {
+      expect(TrackedColonyRecord.fromMap(buildRecord().toMap()).photoPath, isNull);
+
+      final record = TrackedColonyRecord(
+        sessionId: 1,
+        trackId: 7,
+        healthHistory: const [],
+        firstSeenAt: DateTime.utc(2026, 1, 1),
+        lastSeenAt: DateTime.utc(2026, 1, 1),
+        photoPath: 'colony_photos/session1_track7.jpg',
+        photoCropPath: 'colony_photos/session1_track7_crop.jpg',
+        photoLabel: 'CORAL_BL',
+        photoConfidence: 0.83,
+      );
+      final restored = TrackedColonyRecord.fromMap(record.toMap());
+
+      expect(restored.photoPath, record.photoPath);
+      expect(restored.photoCropPath, record.photoCropPath);
+      expect(restored.photoLabel, 'CORAL_BL');
+      expect(restored.photoConfidence, 0.83);
+    });
   });
 }

@@ -6,6 +6,7 @@ import 'package:reefsight_mobile/screens/app_shell.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
 import 'package:reefsight_mobile/screens/video_player_screen.dart';
+import 'package:reefsight_mobile/services/colony_photos.dart';
 import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
@@ -879,6 +880,152 @@ void main() {
       // No stored start and no timestamp in the file name: zero is startedAt.
       expect(player.startAt, const Duration(minutes: 3, seconds: 40));
       expect(player.note, 'Position approximate (recorded before video timing was stored)');
+    });
+  });
+
+  // Sub-plan 18 steps 4-5: the executive tab shows the bleached colonies'
+  // photos; each technical row gets a thumbnail that opens both images.
+  group('colony photos (sub-plan 18)', () {
+    Future<void> pumpWithPhotos(
+      WidgetTester tester,
+      List<String?> labels, {
+      bool withPhotos = true,
+    }) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+      );
+      for (var i = 0; i < labels.length; i++) {
+        final trackId = i + 1;
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: trackId,
+            healthLabel: labels[i],
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+            photoPath: withPhotos ? 'colony_photos/session1_track$trackId.jpg' : null,
+            photoCropPath: withPhotos ? 'colony_photos/session1_track${trackId}_crop.jpg' : null,
+            photoLabel: withPhotos ? (labels[i] ?? 'CORAL_BL') : null,
+            photoConfidence: withPhotos ? 0.86 : null,
+          ),
+        );
+      }
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(
+              sessionId: sessionId,
+              openDatabase: () async => db,
+              // Files needn't exist: the widgets fall back on a load error.
+              resolvePhotos: (colonies) async => ColonyPhotoFiles(
+                context: {
+                  for (final c in colonies)
+                    if (c.photoPath != null) c.trackId: File('/docs/${c.photoPath}'),
+                },
+                crop: {
+                  for (final c in colonies)
+                    if (c.photoCropPath != null) c.trackId: File('/docs/${c.photoCropPath}'),
+                },
+              ),
+            ),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    List<String?> labels({required int bleached, required int healthy}) => [
+          ...List.filled(bleached, 'CORAL_BL'),
+          ...List.filled(healthy, 'CORAL'),
+        ];
+
+    testWidgets('the bleached strip shows a photo per bleached colony only', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 5, healthy: 5));
+
+      expect(find.text('Bleached colonies'), findsOneWidget);
+      for (var id = 1; id <= 5; id++) {
+        expect(find.byKey(ValueKey('bleached-photo-$id')), findsOneWidget);
+      }
+      expect(find.byKey(const ValueKey('bleached-photo-6')), findsNothing);
+    });
+
+    testWidgets('tapping a bleached photo enlarges it', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 5, healthy: 5));
+
+      await tester.tap(find.byKey(const ValueKey('bleached-photo-2')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+      expect(find.text('Colony #2'), findsOneWidget);
+    });
+
+    testWidgets('no bleached colonies: says so', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 0, healthy: 4));
+
+      expect(find.text('No bleached colonies found'), findsOneWidget);
+    });
+
+    testWidgets('below the small-n threshold, the strip is worded as the app\'s call',
+        (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 3, healthy: 3));
+
+      expect(find.text('Colonies the app marked bleached'), findsOneWidget);
+      expect(find.text('Bleached colonies'), findsNothing);
+    });
+
+    testWidgets('a technical row\'s thumbnail opens both images with label and confidence',
+        (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0));
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      final thumbnail = find.byKey(const ValueKey('colony-thumbnail-1'));
+      await tester.scrollUntilVisible(
+        thumbnail,
+        300,
+        scrollable: find
+            .byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down)
+            .last,
+      );
+
+      await tester.tap(thumbnail);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Context'), findsOneWidget);
+      expect(find.text('Classifier input'), findsOneWidget);
+      expect(find.text('Bleached · confidence 0.86'), findsOneWidget);
+    });
+
+    testWidgets('photos add a "Share report with photos" button; none, no button',
+        (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0));
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      final scrollable = find
+          .byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down)
+          .last;
+      await tester.scrollUntilVisible(find.text('Export & Share CSV'), 300, scrollable: scrollable);
+
+      expect(find.text('Share report with photos'), findsOneWidget);
+    });
+
+    testWidgets('a session without photos has no photo share button', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0), withPhotos: false);
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      final scrollable = find
+          .byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down)
+          .last;
+      await tester.scrollUntilVisible(find.text('Export & Share CSV'), 300, scrollable: scrollable);
+
+      expect(find.text('Share report with photos'), findsNothing);
+      expect(find.byKey(const ValueKey('colony-thumbnail-1')), findsNothing);
     });
   });
 }

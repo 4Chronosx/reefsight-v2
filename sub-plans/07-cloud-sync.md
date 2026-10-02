@@ -173,6 +173,10 @@ size up front):
 Both are Wrangler `vars`, so changing them is a config edit and redeploy, not a code change. Re-tune
 the per-diver default once step 0 measures the real video size.
 
+Colony photos (sub-plan 18, `<documents>/colony_photos/`, about 30 KB per colony) join the masks
+tier: never capped, synced with the records. Their stored paths are relative to the documents
+directory, so upload them under the same relative key.
+
 **How usage is counted:** the Worker reads bytes from **D1**, not from R2. R2 has no cheap
 "bucket size" query from a Worker. Completed videos count their `video_bytes`. An in-progress upload
 counts its **reserved** bytes, recorded when the upload starts. That way two uploads starting at once
