@@ -7,7 +7,7 @@ import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 // colony: track ID, species + confidence, health label + confidence history
 // across frames, first/last-seen timestamp, size estimate, reference path
 // to its mask file." `species`/`speciesConfidence` are nullable because the
-// currently-shipping `coralvos_primary` segmentation model is single-class
+// currently-shipping Stage B segmentation model is single-class
 // (nc: 1, "coral") -- no species model exists yet (mobile/CLAUDE.md,
 // "Models are interim, not final"). `sizePx` stays in pixels per this
 // sub-plan's resolved scope (no pixel-to-real-world calibration mechanism

@@ -369,4 +369,64 @@ void main() {
       expectComparison(row);
     });
   });
+
+  // Sub-plan 17: the intervals the app shows, in the session CSV so the
+  // thesis can quote the same numbers. Filled whenever colonies are given,
+  // below the small-sample threshold too (that rule is the executive tab's).
+  group('Interval columns (sub-plan 17)', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('report_exporter_interval_test');
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    });
+
+    final session = TransectSession(
+      startedAt: DateTime.utc(2026, 10, 2, 1, 5),
+      tapeLengthMeters: 50,
+      siteName: 'Day-as',
+    );
+
+    Future<Map<String, String>> exportRow(List<TrackedColonyRecord>? colonies) async {
+      final path = await ReportExporter.exportSessionCsv(
+        outputDirectory: tempDir.path,
+        session: session,
+        colonies: colonies,
+      );
+      final rows = const CsvToListConverter(shouldParseNumbers: false)
+          .convert(await File(path).readAsString());
+      expect(rows.first, ReportExporter.sessionCsvHeaders);
+      return Map.fromIterables(rows.first.map((h) => '$h'), rows[1].map((c) => '$c'));
+    }
+
+    test('carries prevalence and density with their 95% bounds', () async {
+      // 18 of 100 bleached on a 50 m x 1 m belt.
+      final row = await exportRow([
+        for (var i = 0; i < 100; i++)
+          colony(trackId: i + 1, healthLabel: i < 18 ? 'CORAL_BL' : 'CORAL'),
+      ]);
+
+      expect(row['Prevalence (%)'], '18.00');
+      expect(row['Prevalence 95% Low (%)'], '11.70');
+      expect(row['Prevalence 95% High (%)'], '26.67');
+      expect(row['Density (/m²)'], '2.000');
+      expect(double.parse(row['Density 95% Low (/m²)']!), closeTo(81.364 / 50, 1e-3));
+      expect(double.parse(row['Density 95% High (/m²)']!), closeTo(121.63 / 50, 1e-3));
+    });
+
+    test('without colonies, or with none classified, the cells are empty', () async {
+      final withoutColonies = await exportRow(null);
+      final noneClassified = await exportRow([colony(trackId: 1)]);
+
+      for (final column in ['Prevalence (%)', 'Prevalence 95% Low (%)', 'Density (/m²)']) {
+        expect(withoutColonies[column], '', reason: column);
+      }
+      expect(noneClassified['Prevalence (%)'], '');
+      expect(noneClassified['Prevalence 95% High (%)'], '');
+      expect(noneClassified['Density (/m²)'], '0.020');
+    });
+  });
 }

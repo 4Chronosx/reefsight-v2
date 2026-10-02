@@ -3,6 +3,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/session_summary.dart';
 import '../widgets/glove_button.dart';
@@ -157,8 +158,13 @@ class _SurveyCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final session = summary.session;
     final incomplete = session.endedAt == null;
-    final bleachingPct =
-        summary.colonyCount == 0 ? null : summary.bleachedCount / summary.colonyCount;
+    // Sub-plan 17: over classified colonies (sub-plan 10), with its
+    // interval -- the same figure Summary shows. Below the threshold there
+    // is no bar, only "too few".
+    final prevalence = PrevalenceEstimate.of(
+      bleached: summary.bleachedCount,
+      classified: summary.classifiedCount,
+    );
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
@@ -218,15 +224,32 @@ class _SurveyCard extends StatelessWidget {
                   children: [
                     Text('${summary.colonyCount} colonies', style: const TextStyle(fontSize: 13)),
                     const SizedBox(width: 12),
-                    if (bleachingPct != null)
+                    if (prevalence != null && prevalence.reliable) ...[
                       Expanded(
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
-                            value: bleachingPct,
+                            value: prevalence.fraction,
                             backgroundColor: AppColors.healthy.withValues(alpha: 0.15),
                             valueColor: const AlwaysStoppedAnimation(AppColors.bleached),
                             minHeight: 8,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    // Flexible + ellipsis: at a large system text scale the
+                    // label would otherwise overflow the Row on a narrow phone.
+                    if (summary.colonyCount > 0)
+                      Flexible(
+                        child: Text(
+                          prevalence?.cardLabel ?? 'None classified',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: prevalence?.reliable ?? false
+                                ? AppColors.bleached
+                                : Colors.grey.shade600,
+                            fontSize: 12,
                           ),
                         ),
                       ),

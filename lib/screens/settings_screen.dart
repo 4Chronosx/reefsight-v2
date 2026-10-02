@@ -123,7 +123,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text('ReefSight -- coral reef health survey'),
                 SizedBox(height: 8),
                 Text(
-                  'Segmentation model: ${ModelAssets.coralvosPrimarySegmentation}\n'
+                  'Segmentation model: ${ModelAssets.stageBSegmentation}\n'
                   'Bleaching classifier: ${ModelAssets.nmfsOsiBleachingClassifier}',
                   style: TextStyle(fontSize: 12),
                 ),

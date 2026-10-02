@@ -95,4 +95,112 @@ void main() {
       expect(totalBinned, 2);
     });
   });
+
+  intervalTests();
+}
+
+// Sub-plan 17: the intervals and the small-sample rule (fewer than
+// `minClassifiedForPrevalence` classified colonies -> the executive wording
+// gives "too few" instead of a percentage).
+List<TrackedColonyRecord> colonies({
+  int bleached = 0,
+  int healthy = 0,
+  int uncertain = 0,
+}) => [
+      for (var i = 0; i < bleached; i++) colony(healthLabel: 'CORAL_BL'),
+      for (var i = 0; i < healthy; i++) colony(healthLabel: 'CORAL'),
+      for (var i = 0; i < uncertain; i++) colony(healthLabel: null),
+    ];
+
+void intervalTests() {
+  final session = TransectSession(
+    id: 1,
+    startedAt: DateTime.utc(2026, 1, 1),
+    tapeLengthMeters: 50,
+  );
+
+  group('PrevalenceEstimate', () {
+    test('is null with nothing classified', () {
+      expect(PrevalenceEstimate.of(bleached: 0, classified: 0), isNull);
+    });
+
+    test('is reliable from minClassifiedForPrevalence classified up', () {
+      expect(minClassifiedForPrevalence, 10);
+      expect(PrevalenceEstimate.of(bleached: 3, classified: 9)!.reliable, isFalse);
+      expect(PrevalenceEstimate.of(bleached: 3, classified: 10)!.reliable, isTrue);
+    });
+
+    test('carries the Wilson interval on (bleached, classified)', () {
+      final estimate = PrevalenceEstimate.of(bleached: 18, classified: 100)!;
+      expect(estimate.fraction, 0.18);
+      expect(estimate.interval.low, closeTo(0.1170, 1e-4));
+      expect(estimate.interval.high, closeTo(0.2667, 1e-4));
+    });
+
+    test('wording: executive, technical and card', () {
+      final estimate = PrevalenceEstimate.of(bleached: 18, classified: 100)!;
+      expect(
+        estimate.executiveSentence,
+        'About 18% of classified colonies were bleached (likely between 12% and 27%).',
+      );
+      expect(
+        estimate.technicalLine,
+        'Bleaching prevalence: 18.0% (95% CI 11.7–26.7%, Wilson; n = 100 classified)',
+      );
+      expect(estimate.cardLabel, '18% bleached (12–27%)');
+    });
+
+    test('wording below the threshold: too few, but technical keeps the number', () {
+      final estimate = PrevalenceEstimate.of(bleached: 3, classified: 6)!;
+      expect(
+        estimate.executiveSentence,
+        'Too few classified colonies to estimate bleaching reliably (n = 6).',
+      );
+      expect(estimate.cardLabel, 'Too few classified (n = 6)');
+      expect(estimate.technicalLine, startsWith('Bleaching prevalence: 50.0% (95% CI '));
+    });
+  });
+
+  group('TransectReport intervals', () {
+    test('prevalence is over classified colonies only', () {
+      final report = TransectReport(
+        session: session,
+        colonies: colonies(bleached: 5, healthy: 5, uncertain: 7),
+      );
+      expect(report.prevalence!.classified, 10);
+      expect(report.prevalenceReliable, isTrue);
+      expect(report.prevalenceInterval!.low, closeTo(0.2366, 1e-4));
+    });
+
+    test('prevalenceReliable is false below the threshold', () {
+      final report = TransectReport(
+        session: session,
+        colonies: colonies(bleached: 1, healthy: 8, uncertain: 20),
+      );
+      expect(report.prevalenceReliable, isFalse);
+    });
+
+    test('nothing classified: no prevalence, not reliable', () {
+      final report = TransectReport(session: session, colonies: colonies(uncertain: 3));
+      expect(report.prevalence, isNull);
+      expect(report.prevalenceInterval, isNull);
+      expect(report.prevalenceReliable, isFalse);
+    });
+
+    test('densityInterval is the count interval over the belt area', () {
+      final report = TransectReport(session: session, colonies: colonies(healthy: 10));
+      expect(report.densityInterval.low, closeTo(4.7954 / 50, 1e-4));
+      expect(report.densityInterval.high, closeTo(18.3904 / 50, 1e-4));
+    });
+
+    test('density wording', () {
+      final report = TransectReport(session: session, colonies: colonies(healthy: 10));
+      expect(report.executiveDensityLine, '≈ 0.20 colonies/m² (0.10–0.37)');
+      expect(
+        report.technicalDensityLine,
+        'Density: 0.20 colonies/m² (95% CI 0.10–0.37, exact Poisson; '
+        'n = 10 colonies, 50 m² belt)',
+      );
+    });
+  });
 }

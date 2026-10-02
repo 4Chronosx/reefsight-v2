@@ -89,12 +89,13 @@ void main() {
           resultsHidden: hidden,
         ),
       );
-      for (final (trackId, label) in [(1, 'CORAL'), (2, 'CORAL_BL')]) {
+      // 5 of 10 bleached: at the sub-plan 17 threshold, so a percentage shows.
+      for (var i = 0; i < 10; i++) {
         await db.upsertColony(
           TrackedColonyRecord(
             sessionId: id,
-            trackId: trackId,
-            healthLabel: label,
+            trackId: i + 1,
+            healthLabel: i < 5 ? 'CORAL_BL' : 'CORAL',
             healthHistory: const [],
             firstSeenAt: DateTime.utc(2026, 1, day),
             lastSeenAt: DateTime.utc(2026, 1, day),
@@ -115,8 +116,61 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('50% bleached'), findsOneWidget, reason: 'the shown survey only');
+    expect(find.text('50% bleached (24–76%)'), findsOneWidget, reason: 'the shown survey only');
     expect(find.text('Results hidden'), findsOneWidget);
+  });
+
+  // Sub-plan 17: the card's figure is over classified colonies (sub-plan
+  // 10's denominator, as on Summary), with its Wilson interval -- or "too
+  // few" below `minClassifiedForPrevalence`.
+  testWidgets('bleaching is over classified colonies, with its interval or too few',
+      (tester) async {
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    Future<void> seed(String site, List<String?> labels, {required int day}) async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, day),
+          tapeLengthMeters: 50,
+          siteName: site,
+        ),
+      );
+      for (var i = 0; i < labels.length; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: i + 1,
+            healthLabel: labels[i],
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, day),
+            lastSeenAt: DateTime.utc(2026, 1, day),
+          ),
+        );
+      }
+    }
+
+    // 2 bleached of 10 classified, plus 10 uncertain: 20%, not 2 / 20.
+    await seed('Big Site', [
+      ...List.filled(2, 'CORAL_BL'),
+      ...List.filled(8, 'CORAL'),
+      ...List<String?>.filled(10, null),
+    ], day: 1);
+    await seed('Small Site', [
+      ...List.filled(3, 'CORAL_BL'),
+      ...List.filled(3, 'CORAL'),
+    ], day: 2);
+
+    await tester.pumpWidget(
+      _wrap(HomeScreen(
+        dataRevision: 0,
+        onSeeAllSurveys: () {},
+        openDatabase: () async => db,
+      )),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('20% bleached (6–51%)'), findsOneWidget);
+    expect(find.text('Too few classified (n = 6)'), findsOneWidget);
   });
 
   testWidgets('"See all" invokes onSeeAllSurveys', (tester) async {

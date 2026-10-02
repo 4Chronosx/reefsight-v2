@@ -23,7 +23,9 @@ Tracks 2-3 — read both before changing structure here, not just this file or `
   `tracker/kalman_filter.py`, `tracker/matching.py`, `tracker/bot_sort.py` — not an independently
   designed tracker, and not DeepSORT. Validate against the original Python implementation's recorded
   outputs on the same test sequences, per root `CLAUDE.md`'s BoT-SORT porting rule.
-- **Models are interim, not final.** Stage B: `coralvos_primary` (`research_logs/stage_b/coralvos_primary/`).
+- **Models are interim, not final.** Stage B: `coralscapes_v3` since 2026-10-02 (`research_logs/stage_b/coralscapes_v3/`;
+  won 24c under ml-01's ship rule, provisional until v4 and the transect check are in; was `coralvos_primary`),
+  bundled as `assets/models/stage_b_seg.mlpackage.zip`.
   Stage C: NMFS-OSI's published YOLO11n-cls classifier, verified on this project's own leakage-safe
   NOAA split (`research_logs/stage_c/external_noaa_model_eval/`) — not yet Cordova-fine-tuned; that's
   deferred pending field team annotations (`sub-plans/track1-handoff.md`, "Do these first" #1).

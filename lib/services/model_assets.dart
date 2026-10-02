@@ -8,8 +8,12 @@
 class ModelAssets {
   const ModelAssets._();
 
-  static const String coralvosPrimarySegmentation =
-      'assets/models/coralvos_primary.mlpackage.zip';
+  /// Stage B colony segmentation. The filename deliberately carries no run
+  /// name: notebook 23's `STAGE_B_SOURCE` picks which trained arm is exported
+  /// here (`coralscapes_v3` since 2026-10-02, `coralvos_primary` before), so
+  /// swapping models never needs a Dart change.
+  static const String stageBSegmentation =
+      'assets/models/stage_b_seg.mlpackage.zip';
 
   static const String nmfsOsiBleachingClassifier =
       'assets/models/nmfs_osi_bleaching.mlpackage.zip';

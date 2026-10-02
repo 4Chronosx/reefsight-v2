@@ -123,7 +123,8 @@ void main() {
       }
     }
 
-    await seed('Shown Site', hidden: false, colonies: 2);
+    // 10 colonies: at the sub-plan 17 threshold, so the bar shows.
+    await seed('Shown Site', hidden: false, colonies: 10);
     await seed('Hidden Site', hidden: true, colonies: 3);
 
     await tester.pumpWidget(
@@ -131,10 +132,100 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('2 colonies'), findsOneWidget);
+    expect(find.text('10 colonies'), findsOneWidget);
     expect(find.text('3 colonies'), findsNothing);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
     expect(find.text('Results hidden — recount pending'), findsOneWidget);
+  });
+
+  // Sub-plan 17: the bar and figure are over classified colonies (sub-plan
+  // 10's denominator, as on Summary), with the Wilson interval -- or "too
+  // few" and no bar below `minClassifiedForPrevalence`.
+  testWidgets('bleaching is over classified colonies, with its interval or too few',
+      (tester) async {
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    Future<void> seed(String site, List<String?> labels, {required int day}) async {
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, day),
+          tapeLengthMeters: 50,
+          siteName: site,
+        ),
+      );
+      for (var i = 0; i < labels.length; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: i + 1,
+            healthLabel: labels[i],
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, day),
+            lastSeenAt: DateTime.utc(2026, 1, day),
+          ),
+        );
+      }
+    }
+
+    // 2 bleached of 10 classified, plus 10 uncertain: 20%, not 2 / 20.
+    await seed('Big Site', [
+      ...List.filled(2, 'CORAL_BL'),
+      ...List.filled(8, 'CORAL'),
+      ...List<String?>.filled(10, null),
+    ], day: 1);
+    await seed('Small Site', [
+      ...List.filled(3, 'CORAL_BL'),
+      ...List.filled(3, 'CORAL'),
+    ], day: 2);
+
+    await tester.pumpWidget(
+      _wrap(SurveysScreen(dataRevision: 0, openDatabase: () async => db)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('20% bleached (6–51%)'), findsOneWidget);
+    final bar = tester.widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator));
+    expect(bar.value, 0.2);
+    expect(find.text('Too few classified (n = 6)'), findsOneWidget);
+  });
+
+  testWidgets('nothing classified says so; a narrow phone at 1.5x text does not overflow',
+      (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final db = await TransectDatabase.openInMemoryForTest();
+    addTearDown(db.close);
+    Future<void> seed(String site, List<String?> labels, {required int day}) async {
+      final id = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, day), tapeLengthMeters: 50, siteName: site),
+      );
+      for (var i = 0; i < labels.length; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: i + 1,
+            healthLabel: labels[i],
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, day),
+            lastSeenAt: DateTime.utc(2026, 1, day),
+          ),
+        );
+      }
+    }
+
+    await seed('Unclassified Site', List<String?>.filled(4, null), day: 1);
+    await seed('Small Site', [...List.filled(3, 'CORAL_BL'), ...List.filled(3, 'CORAL')], day: 2);
+
+    await tester.pumpWidget(
+      _wrap(SurveysScreen(dataRevision: 0, openDatabase: () async => db)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('None classified'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   // File-backed, not in-memory: the export re-reads the list through a new

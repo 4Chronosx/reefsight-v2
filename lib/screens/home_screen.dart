@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/report_data.dart';
 import '../services/session_summary.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/health_chip.dart';
@@ -242,9 +243,12 @@ class _RecentSurveyCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final session = summary.session;
-    final bleachingPct = summary.colonyCount == 0
-        ? null
-        : (summary.bleachedCount / summary.colonyCount * 100).round();
+    // Sub-plan 17: over classified colonies (sub-plan 10), with its
+    // interval or "too few" -- the same figure Summary shows.
+    final prevalence = PrevalenceEstimate.of(
+      bleached: summary.bleachedCount,
+      classified: summary.classifiedCount,
+    );
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -264,11 +268,14 @@ class _RecentSurveyCard extends StatelessWidget {
                 'Results hidden',
                 style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
               )
-            : bleachingPct == null
+            : prevalence == null
                 ? const HealthChip(healthLabel: null)
                 : Text(
-                    '$bleachingPct% bleached',
-                    style: const TextStyle(color: AppColors.bleached, fontSize: 12),
+                    prevalence.cardLabel,
+                    style: TextStyle(
+                      color: prevalence.reliable ? AppColors.bleached : Colors.grey.shade600,
+                      fontSize: 12,
+                    ),
                   ),
       ),
     );

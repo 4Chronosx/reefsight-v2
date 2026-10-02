@@ -877,7 +877,7 @@ class _ExecutiveTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final prevalence = report.bleachingPrevalenceFraction;
+    final prevalence = report.prevalence;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -953,19 +953,18 @@ class _ExecutiveTab extends StatelessWidget {
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
+            // Sub-plan 17: the interval, or "too few" below
+            // `minClassifiedForPrevalence` -- no caveats beyond that here.
             child: Text(
-              prevalence == null
-                  ? 'No colonies were successfully classified this session.'
-                  : '${(prevalence * 100).toStringAsFixed(0)}% of surveyed '
-                      'colonies showed signs of bleaching.',
+              prevalence?.executiveSentence ??
+                  'No colonies were successfully classified this session.',
               style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
             ),
           ),
         ),
         const SizedBox(height: 12),
         Text(
-          'Density: ${report.densityPerSquareMeter.toStringAsFixed(2)} '
-          'colonies/m²',
+          'Density: ${report.executiveDensityLine}',
           style: const TextStyle(color: AppColors.onSurface, fontSize: 14),
         ),
       ],
@@ -1099,12 +1098,26 @@ class _TechnicalTabState extends State<_TechnicalTab> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        // Sub-plan 17: the exact intervals with method and n, always --
+        // the small-sample rule only applies to the Executive tab.
         Text(
-          'Density: ${report.densityPerSquareMeter.toStringAsFixed(2)} '
-          'colonies/m²   ·   '
-          'Bleaching prevalence: '
-          '${report.bleachingPrevalenceFraction == null ? '--' : '${(report.bleachingPrevalenceFraction! * 100).toStringAsFixed(1)}%'}',
+          report.technicalDensityLine,
           style: const TextStyle(color: AppColors.onSurface, fontSize: 13),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          report.prevalence?.technicalLine ?? 'Bleaching prevalence: --',
+          style: const TextStyle(color: AppColors.onSurface, fontSize: 13),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Intervals are 95% and cover sampling uncertainty only -- not '
+          'detector misses, double counts or classifier errors (see the '
+          'recount comparison).',
+          style: TextStyle(
+            color: AppColors.onSurface.withValues(alpha: 0.6),
+            fontSize: 12,
+          ),
         ),
         if (_thermalNote(report.session.thermalPeak) case final note?)
           Padding(

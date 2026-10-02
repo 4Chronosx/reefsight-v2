@@ -674,7 +674,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
           children: [
             YOLOView(
               controller: _yoloController,
-              modelPath: ModelAssets.coralvosPrimarySegmentation,
+              modelPath: ModelAssets.stageBSegmentation,
               task: YOLOTask.segment,
               streamingConfig: const YOLOStreamingConfig.custom(
                 includeOriginalImage: true,

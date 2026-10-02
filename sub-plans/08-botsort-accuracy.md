@@ -11,6 +11,12 @@ tracker **tracks coral well**. This sub-plan is about that second question.
   update rate for every seconds↔updates conversion here.
 - ML sub-plan 1 (Stage B v2) must land first too, because step 3's thresholds are chosen from the
   detector's scores. ML sub-plan 1 produces that score histogram, so step 3 can reuse it.
+  **Update 2026-10-02:** done for the candidates. `24c_stage_b_benchmark_suite.ipynb` writes every
+  detection (conf ≥ 0.05) per model to `research_logs/stage_b/benchmark_suite/<RUN_ID>/detections.csv`
+  (`model, dataset, group, conf, overlap, matched, area_frac, …`). The shipped detector is now
+  `coralscapes_v3` (provisional until v4 is benchmarked). Throughout this file, "the shipped detector"
+  means whatever `23_coreml_export`'s latest `result.json` names in `stage_b_source`, not
+  `coralvos_primary`.
 
 **Goal (decided 2026-09-28): tracking accuracy**, meaning fewer ID switches, fewer fragmented tracks,
 and above all fewer **double-counted colonies**. Unique track IDs are what the post-transect density
@@ -34,8 +40,11 @@ measurement is guessing.**
 2. **The thresholds are the reference's pedestrian (MOT17) defaults, never tuned for coral:**
    `trackHighThresh 0.6`, `trackLowThresh 0.1`, `newTrackThresh 0.7`, `matchThresh 0.8`,
    `trackBuffer 30`.
-   - **Spawning:** if `coralvos_primary`'s confidence for real colonies often sits below 0.7, those
-     colonies never spawn a track at all (undercounting).
+   - **Spawning:** if the shipped detector's confidence for real colonies often sits below 0.7, those
+     colonies never spawn a track at all (undercounting). **First evidence (24c run `20261002_221729`,
+     `coralscapes_v3`, all 13 reserved videos):** 11,470 detections at conf ≥ 0.25 (85% on coral) but only
+     5,238 at ≥ 0.6 (95% on coral). So more than half of the mostly-correct detections never reach the
+     spawn threshold. That's a frame-level observation, not yet a tracking result.
    - **Units:** `trackBuffer` is in **tracker updates, not seconds**. The live stream runs inference at
      8 Hz (`inferenceFrequency: 8`), so 30 updates is **~3.75 s** of lost-track memory, not the ~1 s
      it means on 30 fps MOT17 video.
@@ -69,8 +78,8 @@ limitations stated honestly in the thesis:
     sampled frames for every evaluation video, following this project's standing verify-don't-assume
     discipline (e.g. `19_coralvos_split_and_quality_audit.ipynb`).
 - **Which videos:** only the **13 reserved CoralVOS videos** (`i % 10 == 0` by sorted name, pHash-
-  checked independent). `coralvos_primary` never trained on them, so the detections fed to the tracker
-  are honest. Split those 13 **by video** into a **tuning set (6)** and a **held-out test set (7)**.
+  checked independent). No Stage B arm (primary, v2, v3, v4) trained on them, so the detections fed to
+  the tracker are honest. Split those 13 **by video** into a **tuning set (6)** and a **held-out test set (7)**.
   Choose parameters on tuning, then report once on test. Never tune on test.
 - **Partial masks:** some videos' masks stop before the video ends (e.g. `video123`). Evaluate only the
   masked span, the same rule as `20_coralvos_coverage_benchmark.ipynb`.
@@ -89,8 +98,9 @@ can run.
    pseudo ground truth in MOTChallenge format (`frame,id,x,y,w,h,conf,class,visibility`), with ignore
    regions and a linking contact sheet. It follows the run-versioned logging convention
    (`runs_tracking/<RUN_ID>/`, `latest_run.txt`).
-2. **Notebook `…/02_coralvos_detections.ipynb`** runs `coralvos_primary` (same weights as the shipped
-   Core ML asset, resolved through its `latest_run.txt`) over the subsampled frames. It writes per-frame
+2. **Notebook `…/02_coralvos_detections.ipynb`** runs the shipped detector (the same `.pt` the shipped
+   Core ML asset was exported from: read `stage_b_source` and `stage_b_source_run` from
+   `research_logs/export_coreml/latest_run.txt` → `result.json`) over the subsampled frames. It writes per-frame
    detections (box, score) to JSON. That way the tracker is always tuned on the **real model's** score
    distribution, which is what threshold tuning is about.
 3. **Dart tool `mobile/tool/track_eval.dart`** (`dart run`) feeds those detections, plus grayscale
@@ -127,9 +137,18 @@ against.
   here.
 
 ### 3. Threshold tuning for coral at 8 Hz
-- First, plot `coralvos_primary`'s detection-score distribution on the tuning set: true matches vs
-  false positives, against ground truth. That's where sensible `trackHighThresh` and `newTrackThresh`
-  values come from, instead of a blind grid.
+- **Starting point: reuse 24c's `detections.csv`. Don't re-plot from scratch.** Filter it to
+  `model == <shipped detector>`, `dataset == 'coralvos_reserved'`, **and `group` in the 6 tuning videos
+  only**. 24c scored all 13 reserved videos, so the unfiltered histogram already includes the 7 test
+  videos. Choosing thresholds from it would leak the test set. Plot matched vs unmatched by confidence,
+  and read off where the matched share and the number of real colonies lost both look acceptable. That
+  gives the sweep's centre values for `trackHighThresh` and `newTrackThresh` instead of a blind grid.
+  - "Matched" in 24c means ≥ 50% of the detection's mask lies on GT coral. That's a frame-level notion,
+    not a track-level one, which is why the sweep below still decides.
+  - The `coralscapes_test` rows may be shown as a second reference (different reefs and labelling),
+    but they don't set the values: tracking is evaluated on CoralVOS sequences.
+  - If the shipped detector changes again (e.g. v4), redo this from the new 24c run's rows for that model.
+    Thresholds tuned for one model's scores don't transfer to another.
 - Then run a bounded sweep on the tuning set with `track_eval.dart`:
   - `trackHighThresh`, `trackLowThresh`, `newTrackThresh`
   - `matchThresh`

@@ -178,6 +178,82 @@ void main() {
 
   // Sub-plan 11 step 4: an incomplete session is labelled with what was
   // kept, not hidden or edited.
+  // Sub-plan 17: every prevalence and density figure carries its 95%
+  // interval; below `minClassifiedForPrevalence` classified colonies the
+  // executive tab says "too few" while the technical tab keeps the number.
+  group('prevalence and density intervals (sub-plan 17)', () {
+    Future<void> pumpWithLabels(WidgetTester tester, List<String?> labels) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+      );
+      for (var i = 0; i < labels.length; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: sessionId,
+            trackId: i + 1,
+            healthLabel: labels[i],
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+          ),
+        );
+      }
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SummaryScreen(sessionId: sessionId, openDatabase: () async => db),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    List<String?> labels({required int bleached, required int healthy}) => [
+          ...List.filled(bleached, 'CORAL_BL'),
+          ...List.filled(healthy, 'CORAL'),
+        ];
+
+    testWidgets('below the threshold: too few on Executive, the number on Technical',
+        (tester) async {
+      await pumpWithLabels(tester, labels(bleached: 3, healthy: 3));
+
+      expect(
+        find.text('Too few classified colonies to estimate bleaching reliably (n = 6).'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('of classified colonies were bleached'), findsNothing);
+      expect(find.textContaining('≈ 0.12 colonies/m² ('), findsOneWidget);
+
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Bleaching prevalence: 50.0% (95% CI 18.8–81.2%, Wilson; n = 6 classified)'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Density: 0.12 colonies/m² (95% CI '), findsOneWidget);
+      expect(find.textContaining('sampling uncertainty only'), findsOneWidget);
+    });
+
+    testWidgets('at the threshold: the Executive sentence carries the interval',
+        (tester) async {
+      await pumpWithLabels(tester, labels(bleached: 5, healthy: 5));
+
+      expect(
+        find.text('About 50% of classified colonies were bleached '
+            '(likely between 24% and 76%).'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Too few classified'), findsNothing);
+    });
+  });
+
   group('incomplete session banner', () {
     Future<int> seed(
       TransectDatabase db, {

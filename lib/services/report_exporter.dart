@@ -115,7 +115,37 @@ class ReportExporter {
     'Exit Source',
     'Entry-Exit Distance (m)',
     ..._recountHeaders,
+    ..._intervalHeaders,
   ];
+
+  /// Sub-plan 17: the prevalence and density the app shows, with their 95%
+  /// bounds (Wilson on bleached/classified; exact Poisson on the count over
+  /// the belt area) -- so the thesis quotes the same intervals. Filled
+  /// whenever the colonies are given, below the executive tab's small-sample
+  /// threshold too. Sampling uncertainty only.
+  static const List<String> _intervalHeaders = [
+    'Prevalence (%)',
+    'Prevalence 95% Low (%)',
+    'Prevalence 95% High (%)',
+    'Density (/m²)',
+    'Density 95% Low (/m²)',
+    'Density 95% High (/m²)',
+  ];
+
+  static List<dynamic> _intervalCells(TransectReport? report) {
+    final prevalence = report?.prevalence;
+    final density = report?.densityInterval;
+    String percent(double? fraction) => _fixed(fraction == null ? null : fraction * 100);
+    String perArea(double? value) => value?.toStringAsFixed(3) ?? '';
+    return [
+      percent(prevalence?.fraction),
+      percent(prevalence?.interval.low),
+      percent(prevalence?.interval.high),
+      perArea(report?.densityPerSquareMeter),
+      perArea(density?.low),
+      perArea(density?.high),
+    ];
+  }
 
   /// Sub-plan 14 step 6: the recount, the app's counts, and the comparison
   /// -- appended to the session CSV and repeated in Surveys' comparisons
@@ -230,6 +260,7 @@ class ReportExporter {
           appBleached: report?.bleachedCount,
           appClassified: report?.classifiedCount,
         ),
+        ..._intervalCells(report),
       ],
     ]);
   }

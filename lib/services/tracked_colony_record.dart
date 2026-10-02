@@ -8,9 +8,8 @@ import 'health_history_recorder.dart';
 /// last-seen timestamp, size estimate, reference path to its mask file."
 ///
 /// [species]/[speciesConfidence] are `null` on every row this cycle -- the
-/// shipping `coralvos_primary` segmentation model is single-class (`nc: 1`,
-/// "coral"; see `machine-learning-pipeline/datasets_converted/
-/// coralvos_primary_blend/data_coralvos_primary.yaml`), not the future
+/// shipping Stage B segmentation model (`ModelAssets.stageBSegmentation`) is
+/// single-class (`nc: 1`, "coral", in every Stage B arm so far), not the future
 /// per-forward-pass species model the Specification describes. The columns
 /// exist now for forward compatibility, not populated by fabrication.
 ///
