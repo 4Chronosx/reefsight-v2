@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 import '../tracking/bot_sort_tracker.dart';
+import '../tracking/camera_motion_compensation.dart';
 import '../tracking/strack.dart';
 import '../tracking/tracker_detection.dart';
 import 'bleaching_classifier.dart';
@@ -62,6 +63,7 @@ class LiveFrameProcessor {
     this.thresholds = ClassificationThresholds.defaults,
     this.cutContextPhotos,
     this.onContextPhoto,
+    this.motionFrame,
     Duration reclassifyEvery = const Duration(seconds: 1),
     int maxPerFrame = 3,
     DateTime Function()? now,
@@ -150,6 +152,29 @@ class LiveFrameProcessor {
   /// At most this many fallback photos are cut from one frame.
   static const maxContextPhotosPerFrame = 3;
 
+  /// Decodes an event's frame into the grayscale frame the tracker's camera
+  /// motion compensation needs (sub-plan 08 step 2), e.g. [decodeCmcFrame].
+  /// `null` (the default) passes no frame, i.e. no CMC. Runs synchronously
+  /// before every tracker update, so its cost is part of the update time
+  /// [LiveLoopMetrics] reports.
+  final GrayscaleFrame? Function(({Uint8List bytes, int width, int height}) frame)? motionFrame;
+  bool _motionFrameFailureLogged = false;
+
+  GrayscaleFrame? _motionFrameFor(({Uint8List bytes, int width, int height})? frame) {
+    final decode = motionFrame;
+    if (decode == null || frame == null) return null;
+    try {
+      return decode(frame);
+    } catch (error) {
+      // A frame that won't decode costs this update its CMC, nothing more.
+      if (!_motionFrameFailureLogged) {
+        _motionFrameFailureLogged = true;
+        debugPrint('ReefSight: CMC frame decode failed (logged once): $error');
+      }
+      return null;
+    }
+  }
+
   bool _closed = false;
   Future<void>? _legacyInFlight;
 
@@ -179,8 +204,9 @@ class LiveFrameProcessor {
       return;
     }
 
-    final tracks = _tracker.update(detections);
-    metrics?.recordTrackerUpdate();
+    final updateTimer = Stopwatch()..start();
+    final tracks = _tracker.update(detections, frame: _motionFrameFor(frame));
+    metrics?.recordTrackerUpdate(elapsed: updateTimer.elapsed);
     onTracks(tracks);
     if (frame != null) _takeContextPhotos(tracks, frame);
 

@@ -10,6 +10,8 @@ import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/live_frame_processor.dart';
 import 'package:reefsight_mobile/services/live_loop_metrics.dart';
 import 'package:reefsight_mobile/tracking/bot_sort_tracker.dart';
+import 'package:reefsight_mobile/tracking/camera_motion_compensation.dart';
+import 'package:reefsight_mobile/tracking/linalg.dart' as linalg;
 import 'package:reefsight_mobile/tracking/strack.dart';
 
 // Sub-plan 09 (live-loop decoupling), steps 2-4. The processor is the live
@@ -737,4 +739,97 @@ void main() {
       expect(s.classificationsPerSecond, closeTo(3, 0.5));
     });
   });
+
+  group('LiveFrameProcessor camera motion compensation (sub-plan 08 step 2)', () {
+    LiveFrameProcessor processorWith(
+      _RecordingCompensator compensator, {
+      GrayscaleFrame? Function(({Uint8List bytes, int width, int height}) frame)? motionFrame,
+      LiveLoopMetrics? metrics,
+    }) =>
+        LiveFrameProcessor(
+          tracker: BoTSortTracker(cameraMotionCompensator: compensator),
+          classify: _FakeClassifier().call,
+          cropStyle: CropStyle.boxStretch,
+          onTracks: (_) {},
+          onHealth: (_, _, _) {},
+          motionFrame: motionFrame,
+          metrics: metrics,
+        );
+
+    test('every event\'s frame is decoded and reaches the tracker, empty events included', () {
+      final compensator = _RecordingCompensator();
+      final decoded = <({Uint8List bytes, int width, int height})>[];
+      final processor = processorWith(compensator, motionFrame: (f) {
+        decoded.add(f);
+        return GrayscaleFrame(width: 1, height: 1, pixels: [decoded.length]);
+      });
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      processor.handleEvent(_event(const []));
+
+      expect(decoded.map((f) => (f.bytes, f.width, f.height)), [
+        (_frame, 640, 480),
+        (_frame, 640, 480),
+      ]);
+      expect(compensator.frames.map((f) => f.pixels.single), [1, 2]);
+    });
+
+    test('without a decoder the tracker gets no frame (CMC off)', () {
+      final compensator = _RecordingCompensator();
+      processorWith(compensator).handleEvent(_event([_det(100, 100)]));
+      expect(compensator.frames, isEmpty);
+    });
+
+    test('a frame that fails to decode only costs that update its CMC', () {
+      final compensator = _RecordingCompensator();
+      final tracks = <int>[];
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(cameraMotionCompensator: compensator),
+        classify: _FakeClassifier().call,
+        cropStyle: CropStyle.boxStretch,
+        onTracks: (t) => tracks.add(t.length),
+        onHealth: (_, _, _) {},
+        motionFrame: (_) => throw const FormatException('truncated frame'),
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+
+      expect(tracks, [1]);
+      expect(compensator.frames, isEmpty);
+    });
+
+    test('an event without a frame image never calls the decoder', () {
+      var calls = 0;
+      processorWith(_RecordingCompensator(), motionFrame: (_) {
+        calls++;
+        return null;
+      }).handleEvent({
+        'detections': [_det(100, 100)],
+      });
+      expect(calls, 0);
+    });
+
+    test('each tracker update is timed into the loop metrics', () {
+      final metrics = LiveLoopMetrics();
+      final processor = processorWith(
+        _RecordingCompensator(),
+        motionFrame: (_) => GrayscaleFrame(width: 1, height: 1, pixels: [0]),
+        metrics: metrics,
+      );
+      processor.handleEvent(_event([_det(100, 100)]));
+      processor.handleEvent(_event(const []));
+      expect(metrics.summary().updateMeanMs, isNotNull);
+    });
+  });
+}
+
+/// Records the frames the tracker hands its compensator; never moves the camera.
+class _RecordingCompensator extends CameraMotionCompensator {
+  final frames = <GrayscaleFrame>[];
+
+  @override
+  linalg.Matrix apply(GrayscaleFrame frame) {
+    frames.add(frame);
+    return identityWarp();
+  }
 }

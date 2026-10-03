@@ -11,6 +11,7 @@ import '../services/app_settings.dart';
 import '../services/bleaching_classifier.dart';
 import '../services/colony_photos.dart';
 import '../services/colony_size.dart';
+import '../services/confirmed_sightings.dart';
 import '../services/crop_geometry.dart';
 import '../services/device_health_monitor.dart';
 import '../services/device_info.dart';
@@ -29,7 +30,9 @@ import '../services/transect_recorder.dart';
 import '../services/transect_session.dart';
 import '../services/transect_video.dart';
 import '../tracking/bot_sort_tracker.dart';
+import '../tracking/cmc_frames.dart';
 import '../tracking/strack.dart';
+import '../tracking/tracker_config.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/live/device_health_badge.dart';
 import '../widgets/live/diagnostics_overlay.dart';
@@ -115,7 +118,20 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     modelAssetPath: ModelAssets.nmfsOsiBleachingClassifier,
   );
   final _yoloController = YOLOViewController();
-  final _tracker = BoTSortTracker();
+  /// Inference (and so tracker-update) rate requested from the plugin. The
+  /// tracker's lost-track memory is defined in seconds and converted at this
+  /// rate (sub-plan 08, `TrackerConfig.trackBufferFor`).
+  static const _inferenceFrequency = 8;
+
+  /// Settings -> Diagnostics' camera motion compensation switch, read once:
+  /// fixed for this Live session, like the loop and crop style.
+  final _cmc = AppSettings.instance.cameraMotionCompensation.value;
+
+  /// Sub-plan 08's tuned configuration; CMC per [_cmc].
+  late final BoTSortTracker _tracker = TrackerConfig.build(
+    updateHz: _inferenceFrequency.toDouble(),
+    cmc: _cmc,
+  );
 
   /// Settings -> Diagnostics' thresholds, read once: fixed for this Live
   /// session, like the crop style.
@@ -136,14 +152,15 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
 
   // Sub-plan 4 (storage-and-metrics): populated once `_startSession()`
   // resolves the diver-entered tape length and opens the on-device DB.
-  // `_firstSeenAt`'s key set is the authoritative "every track this session
-  // ever saw" list used at session-stop finalize (task 7) -- it's set the
-  // moment a track id first appears, regardless of whether health/size/mask
-  // data was ever successfully captured for it.
+  // `_firstSeenAt`'s key set is the authoritative "every colony this session
+  // saw" list used at session-stop finalize (task 7) -- a track enters it once
+  // the tracker confirms it (sub-plan 08 step 4, [ConfirmedSightings]),
+  // regardless of whether health/size/mask data was ever captured for it.
   TransectDatabase? _db;
   int? _sessionId;
-  final Map<int, DateTime> _firstSeenAt = {};
-  final Map<int, DateTime> _lastSeenAt = {};
+  final _sightings = ConfirmedSightings();
+  Map<int, DateTime> get _firstSeenAt => _sightings.firstSeenAt;
+  Map<int, DateTime> get _lastSeenAt => _sightings.lastSeenAt;
   final Map<int, List<List<double>>> _latestMasks = {};
 
   // Sub-plan 18: each track's best photo so far, written by [_photoStore]
@@ -247,6 +264,11 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       thresholds: _thresholds,
       cutContextPhotos: cutContextPhotosInBackground,
       onContextPhoto: _handleContextPhoto,
+      // CMC needs this frame's pixels before every tracker update: a reduced
+      // grayscale decode (~640 px wide), timed in the loop metrics.
+      motionFrame: _cmc
+          ? (frame) => decodeCmcFrame(frame.bytes, fullWidth: frame.width)
+          : null,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sessionStartFuture = _startSession();
@@ -412,6 +434,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     ) {
       debugPrint('ReefSight: failed to dispose classifier: $error');
     });
+    // close() above stops tracker updates synchronously, so the compensator's
+    // native previous-frame buffers can go now.
+    _tracker.cameraMotionCompensator?.dispose();
     _yoloController.dispose();
     super.dispose();
   }
@@ -712,10 +737,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     final now = DateTime.now().toUtc();
     setState(() {
       _latestTracks = tracks;
+      // Only confirmed tracks are tallied and persisted (sub-plan 08 step 4);
+      // every track is still drawn on the overlay.
+      _sightings.observe(tracks, now);
       for (final track in tracks) {
-        _firstSeenAt.putIfAbsent(track.trackId, () => now);
-        _lastSeenAt[track.trackId] = now;
-
         final payload = track.payload;
         if (payload is! LiveDetectionPayload) continue;
 
@@ -882,7 +907,7 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
         // shipped over the platform channel -- Spec's "Target: 5-8
         // fps" (ReefSight_Specification.md:88), not an arbitrary
         // number.
-        inferenceFrequency: 8,
+        inferenceFrequency: _inferenceFrequency,
       ),
       onStreamingData: _handleStreamingData,
       onModelError: (error, modelPath, task) {

@@ -149,9 +149,26 @@ void main() {
       final line = metrics.summary().format();
 
       expect(line, isNot(contains('\n')));
-      for (final key in ['ev/s', 'upd/s', 'gap', 'cls/s']) {
+      for (final key in ['ev/s', 'upd/s', 'gap', 'trk', 'cls/s']) {
         expect(line, contains(key));
       }
+    });
+
+    test('timed tracker updates report mean and p95 cost (sub-plan 08 CMC latency)', () {
+      final clock = _Clock();
+      final metrics = LiveLoopMetrics(now: () => clock.now);
+      for (final ms in [4, 6, 8, 10, 22]) {
+        metrics.recordTrackerUpdate(elapsed: Duration(milliseconds: ms));
+        clock.advance(125);
+      }
+      metrics.recordTrackerUpdate(); // untimed: counts toward the rate only
+
+      final s = metrics.summary();
+      expect(s.updatesPerSecond, closeTo(8, 0.01));
+      expect(s.updateMeanMs, closeTo(10, 0.001));
+      expect(s.updateP95Ms, 22);
+      expect(s.format(), contains('trk mean/p95 10.0/22.0ms'));
+      expect(LiveLoopMetrics(now: () => clock.now).summary().updateMeanMs, isNull);
     });
   });
 }

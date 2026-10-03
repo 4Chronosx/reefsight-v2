@@ -27,6 +27,14 @@ class AppSettings {
   /// are recorded in `mobile/sub-plans/09-live-loop-decoupling.md`.
   final legacyLiveLoop = ValueNotifier<bool>(false);
 
+  /// Sub-plan 08 step 2: the tracker's camera motion compensation (on by
+  /// default -- it cut ID switches by ~3/4 on CoralVOS). Off runs the tracker
+  /// as before sub-plan 08 did on motion (no per-frame grayscale decode), for
+  /// on-device before/after comparison or if CMC proves too slow. Thresholds
+  /// and confirmed-only counting are unaffected. Read once when Live opens,
+  /// like [legacyLiveLoop].
+  final cameraMotionCompensation = ValueNotifier<bool>(true);
+
   /// Sub-plan 10: how classifier crops are cut. `insideMaskSquare` is the
   /// spec'd default; the box styles exist for ML sub-plan 2's comparison
   /// and for debugging. Read once when Live opens, like [legacyLiveLoop].

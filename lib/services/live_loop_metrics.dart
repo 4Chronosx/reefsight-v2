@@ -12,7 +12,14 @@ class LiveLoopSummary {
     required this.classificationsPerSecond,
     required this.meanBatchMs,
     this.insufficientViews = 0,
+    this.updateMeanMs,
+    this.updateP95Ms,
   });
+
+  /// Time spent in each tracker update, CMC frame decode included (sub-plan
+  /// 08 step 2's on-device latency check). `null` when no update was timed.
+  final double? updateMeanMs;
+  final double? updateP95Ms;
 
   /// Streaming events received from the native segmentation view.
   final double eventsPerSecond;
@@ -42,6 +49,7 @@ class LiveLoopSummary {
     return 'ev/s ${num1(eventsPerSecond)}  '
         'upd/s ${num1(updatesPerSecond)}  '
         'gap p50/p95/max ${gap(gapP50Ms)}/${gap(gapP95Ms)}/${gap(gapMaxMs)}ms  '
+        'trk mean/p95 ${num1(updateMeanMs)}/${num1(updateP95Ms)}ms  '
         'det ${num1(meanDetections)}  '
         'cls/s ${num1(classificationsPerSecond)}  '
         'batch ${meanBatchMs?.toStringAsFixed(0) ?? '--'}ms  '
@@ -72,6 +80,7 @@ class LiveLoopMetrics {
 
   final _events = Queue<({DateTime at, int detections})>();
   final _updates = Queue<DateTime>();
+  final _updateCosts = Queue<({DateTime at, Duration elapsed})>();
   final _batches = Queue<({DateTime at, Duration elapsed, int n})>();
   final _insufficientViews = Queue<DateTime>();
 
@@ -87,9 +96,13 @@ class LiveLoopMetrics {
     _prune(now);
   }
 
-  void recordTrackerUpdate() {
+  /// [elapsed] is how long the update took (CMC frame decode + motion
+  /// estimate + tracking, sub-plan 08 step 2) -- it runs on the UI isolate
+  /// before every update, so it has to fit the Spec's 5-8 fps budget.
+  void recordTrackerUpdate({Duration? elapsed}) {
     final now = _now();
     _updates.add(now);
+    if (elapsed != null) _updateCosts.add((at: now, elapsed: elapsed));
     _prune(now);
   }
 
@@ -114,8 +127,13 @@ class LiveLoopMetrics {
     gaps.sort();
 
     final classifications = _batches.fold<int>(0, (sum, b) => sum + b.n);
+    final costsUs = [for (final c in _updateCosts) c.elapsed.inMicroseconds]..sort();
 
     return LiveLoopSummary(
+      updateMeanMs: costsUs.isEmpty
+          ? null
+          : costsUs.fold<int>(0, (sum, us) => sum + us) / costsUs.length / 1000,
+      updateP95Ms: costsUs.isEmpty ? null : _nearestRank(costsUs, 0.95)! / 1000,
       eventsPerSecond: eventSpan == 0 ? 0 : (_events.length - 1) / eventSpan,
       updatesPerSecond: updateSpan == 0 ? 0 : (_updates.length - 1) / updateSpan,
       gapP50Ms: _nearestRank(gaps, 0.50),
@@ -142,6 +160,9 @@ class LiveLoopMetrics {
     }
     while (_updates.isNotEmpty && _updates.first.isBefore(cutoff)) {
       _updates.removeFirst();
+    }
+    while (_updateCosts.isNotEmpty && _updateCosts.first.at.isBefore(cutoff)) {
+      _updateCosts.removeFirst();
     }
     while (_batches.isNotEmpty && _batches.first.at.isBefore(cutoff)) {
       _batches.removeFirst();

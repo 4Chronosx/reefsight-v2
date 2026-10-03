@@ -79,6 +79,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         AppSettings.instance.legacyLiveLoop.value = value,
                   ),
                 ),
+                ValueListenableBuilder<bool>(
+                  valueListenable: AppSettings.instance.cameraMotionCompensation,
+                  builder: (context, cmc, _) => SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Camera motion compensation'),
+                    subtitle: const Text(
+                      'Corrects tracks for the camera moving between frames. '
+                      'Off: tracker ignores camera motion, as before. '
+                      'Applies from the next transect.',
+                    ),
+                    value: cmc,
+                    onChanged: (value) =>
+                        AppSettings.instance.cameraMotionCompensation.value = value,
+                  ),
+                ),
                 ValueListenableBuilder<CropStyle>(
                   valueListenable: AppSettings.instance.cropStyle,
                   builder: (context, cropStyle, _) => ListTile(
