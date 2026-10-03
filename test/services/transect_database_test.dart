@@ -187,6 +187,61 @@ void main() {
     });
   });
 
+  // Survey deletion (phone only): the session row and its colony rows go in
+  // one transaction; every other session is untouched.
+  group('TransectDatabase.deleteSession', () {
+    late TransectDatabase db;
+
+    setUp(() async {
+      db = await TransectDatabase.openInMemoryForTest();
+    });
+
+    tearDown(() async {
+      await db.close();
+    });
+
+    Future<int> seed(String site, {required int colonies}) async {
+      final id = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50, siteName: site),
+      );
+      for (var i = 0; i < colonies; i++) {
+        await db.upsertColony(
+          TrackedColonyRecord(
+            sessionId: id,
+            trackId: i + 1,
+            healthHistory: const [],
+            firstSeenAt: DateTime.utc(2026, 1, 1),
+            lastSeenAt: DateTime.utc(2026, 1, 1),
+          ),
+        );
+      }
+      return id;
+    }
+
+    test('removes the session and its colonies, returning the deleted session', () async {
+      final keep = await seed('Keep', colonies: 2);
+      final drop = await seed('Drop', colonies: 3);
+
+      final deleted = await db.deleteSession(drop);
+
+      expect(deleted?.id, drop);
+      expect(deleted?.siteName, 'Drop');
+      expect(await db.sessionById(drop), isNull);
+      expect(await db.colonyRowsForSession(drop), isEmpty);
+      expect(await db.sessionById(keep), isNotNull);
+      expect(await db.colonyRowsForSession(keep), hasLength(2));
+      final listed = await db.listSessions();
+      expect(listed.map((s) => s.session.id), [keep]);
+    });
+
+    test('an unknown id is a no-op returning null', () async {
+      final keep = await seed('Keep', colonies: 1);
+
+      expect(await db.deleteSession(keep + 100), isNull);
+      expect(await db.colonyRowsForSession(keep), hasLength(1));
+    });
+  });
+
   // Sub-plan 6 (ui-ux-overhaul), step 2: the only data-layer addition --
   // read-only, no schema change. Backs the Surveys (history) tab, which
   // otherwise has no way to list what's already in SQLite.

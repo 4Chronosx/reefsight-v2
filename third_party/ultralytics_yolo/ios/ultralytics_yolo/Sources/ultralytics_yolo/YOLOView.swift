@@ -464,6 +464,12 @@ public class YOLOView: UIView, VideoCaptureDelegate {
           // otherwise would have missed (it fires before setup completes, when the capture
           // connection doesn't exist yet).
           self.videoCapture.updateVideoOrientation(orientation: self.currentVideoOrientation())
+          // ReefSight: start on the 1x main lens. `bestCaptureDevice` picks the virtual
+          // triple/dual-wide camera, whose default videoZoomFactor 1.0 is the 0.5x
+          // ultra-wide -- every survey was being shot (and recorded) at 0.5x. Before
+          // `start()`, so the recording's first frame is already 1x. A no-op on
+          // single-lens devices and the front camera (see PATCH.md).
+          self.setLens(zoomFactor: 1.0)
           // Once everything is set up, we can start capturing live video.
           self.videoCapture.start()
         } else {

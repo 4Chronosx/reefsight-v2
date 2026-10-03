@@ -99,3 +99,16 @@ with "Interrupted at mm:ss". A recording that stops on its own mid-dive
 (e.g. disk full) is still invisible: `fileOutput(_:didFinishRecordingTo:...)`
 only hands the error to a completion nobody reports. Surfacing it needs an
 event from Swift (e.g. on the existing streaming channel).
+
+**Default lens is 1x, not the 0.5x ultra-wide (2026-10-03).**
+`bestCaptureDevice` (`VideoCapture.swift`) picks the virtual
+`.builtInTripleCamera` / `.builtInDualWideCamera`, and on those the default
+`videoZoomFactor` 1.0 *is* the ultra-wide constituent -- so every survey was
+previewed, segmented and recorded at 0.5x, with nothing ever changing it.
+`start(position:)` in `YOLOView.swift` now calls the existing
+`setLens(zoomFactor: 1.0)` after `updateVideoOrientation` and before
+`videoCapture.start()`, so the recording starts at 1x. No-op on single-lens
+devices and the front camera. Unverified Swift (not compiled on this
+machine): confirm on-device that the zoom label reads 1.0x and the framing
+matches the stock Camera app at 1x. The 4:3 preview crop is fixed on the
+Dart side, not here -- see `docs/camera-lens-and-preview-framing.md`.

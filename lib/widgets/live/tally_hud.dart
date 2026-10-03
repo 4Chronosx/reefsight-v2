@@ -18,6 +18,7 @@ class TallyHud extends StatelessWidget {
     required this.bleachedCount,
     required this.elapsed,
     this.showCounts = true,
+    this.direction = Axis.horizontal,
   });
 
   final int seenCount;
@@ -30,10 +31,34 @@ class TallyHud extends StatelessWidget {
   /// only the elapsed time shows.
   final bool showCounts;
 
+  /// [Axis.vertical] stacks the time and one count per line, value
+  /// right-aligned -- the Live screen's stats panel beside the 4:3 preview
+  /// (docs/camera-lens-and-preview-framing.md). Fills the panel's width.
+  final Axis direction;
+
   @override
   Widget build(BuildContext context) {
     final minutes = elapsed.inMinutes.toString().padLeft(2, '0');
     final seconds = (elapsed.inSeconds % 60).toString().padLeft(2, '0');
+    final vertical = direction == Axis.vertical;
+    final time = Text(
+      '$minutes:$seconds',
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 16,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+    final counts = [
+      _Count(label: 'Seen', value: seenCount, color: Colors.white, expand: vertical),
+      _Count(label: 'Healthy', value: healthyCount, color: AppColors.healthy, expand: vertical),
+      _Count(
+        label: 'Bleached',
+        value: bleachedCount,
+        color: AppColors.bleached,
+        expand: vertical,
+      ),
+    ];
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -42,42 +67,53 @@ class TallyHud extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: AppColors.secondary.withValues(alpha: 0.3)),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            '$minutes:$seconds',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
+      child: vertical
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                time,
+                if (showCounts)
+                  for (final count in counts) ...[const SizedBox(height: 6), count],
+              ],
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                time,
+                if (showCounts) ...[
+                  const SizedBox(width: 16),
+                  counts[0],
+                  const SizedBox(width: 12),
+                  counts[1],
+                  const SizedBox(width: 12),
+                  counts[2],
+                ],
+              ],
             ),
-          ),
-          if (showCounts) ...[
-            const SizedBox(width: 16),
-            _Count(label: 'Seen', value: seenCount, color: Colors.white),
-            const SizedBox(width: 12),
-            _Count(label: 'Healthy', value: healthyCount, color: AppColors.healthy),
-            const SizedBox(width: 12),
-            _Count(label: 'Bleached', value: bleachedCount, color: AppColors.bleached),
-          ],
-        ],
-      ),
     );
   }
 }
 
 class _Count extends StatelessWidget {
-  const _Count({required this.label, required this.value, required this.color});
+  const _Count({
+    required this.label,
+    required this.value,
+    required this.color,
+    this.expand = false,
+  });
 
   final String label;
   final int value;
   final Color color;
 
+  /// Pushes the value to the right edge (vertical tally).
+  final bool expand;
+
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
       children: [
         Container(
           width: 8,
@@ -85,7 +121,20 @@ class _Count extends StatelessWidget {
           margin: const EdgeInsets.only(right: 6),
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
-        Text('$label ', style: const TextStyle(color: Colors.white70, fontSize: 16)),
+        if (expand)
+          // Fades rather than overflows if the panel is ever narrower than
+          // the label -- the count, on the right, always stays whole.
+          Expanded(
+            child: Text(
+              '$label ',
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.fade,
+              style: const TextStyle(color: Colors.white70, fontSize: 16),
+            ),
+          )
+        else
+          Text('$label ', style: const TextStyle(color: Colors.white70, fontSize: 16)),
         Text(
           '$value',
           style: TextStyle(color: color, fontSize: 16, fontWeight: FontWeight.bold),

@@ -10,8 +10,9 @@ import '../widgets/section_card.dart';
 /// toggle for Live's debug overlay, an About section disclosing which model
 /// assets are bundled and that they're interim (mobile `CLAUDE.md`'s "Models
 /// are interim, not final" -- honest disclosure to LGU users and the panel),
-/// and a Data section with storage location/session count. No delete/clear
-/// action (decision 8: surveys are irreversible field data).
+/// and a Data section with storage location/session count. No clear-all
+/// action: a survey is deleted one at a time from Surveys, after a confirm
+/// (`docs/survey-deletion.md`).
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, this.openDatabase = openAppDatabase});
 
@@ -155,7 +156,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ? 'Loading...'
                       : 'Stored on-device (app documents directory). '
                           '$count survey${count == 1 ? '' : 's'} recorded. '
-                          'Surveys can\'t be deleted from the app.',
+                          'Long-press a survey in Surveys to delete it.',
                   style: const TextStyle(fontSize: 13),
                 );
               },

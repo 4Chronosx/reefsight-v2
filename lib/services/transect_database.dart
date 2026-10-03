@@ -386,6 +386,28 @@ class TransectDatabase {
     return changed == 1;
   }
 
+  /// Deletes a survey from this phone: its colony rows, then the session row,
+  /// in one transaction (`tracked_colonies.session_id` has no `ON DELETE
+  /// CASCADE`, and foreign keys are on). Returns the deleted session, so
+  /// the caller can remove its files (`session_files.dart`), or `null` if
+  /// there was no such session. `AUTOINCREMENT` never reuses the id, so a
+  /// later survey can't inherit the deleted one's `session<id>_*` files.
+  ///
+  /// Phone only: this reverses decision 8 ("surveys are irreversible field
+  /// data") for the device, not for cloud sync, which stays append-only
+  /// (`docs/survey-deletion.md`).
+  Future<TransectSession?> deleteSession(int sessionId) => _db.transaction((txn) async {
+        final rows = await txn.query(
+          _sessionsTable,
+          where: 'id = ?',
+          whereArgs: [sessionId],
+        );
+        if (rows.isEmpty) return null;
+        await txn.delete(_coloniesTable, where: 'session_id = ?', whereArgs: [sessionId]);
+        await txn.delete(_sessionsTable, where: 'id = ?', whereArgs: [sessionId]);
+        return TransectSession.fromMap(rows.single);
+      });
+
   Future<List<TrackedColonyRecord>> colonyRowsForSession(
     int sessionId,
   ) async {
@@ -404,8 +426,8 @@ class TransectDatabase {
   /// `c.id` null), so `COUNT(c.id)` correctly reads 0 rather than being
   /// skipped. Rows with `ended_at IS NULL` (app killed mid-dive) are
   /// included -- Surveys must list and flag them as incomplete, not hide
-  /// them (decision 8 in the sub-plan: no delete/clear action exists, so an
-  /// incomplete session is the only way that data is ever seen again).
+  /// them: listing is the only way that data is ever seen again, and the
+  /// diver decides whether to keep it ([deleteSession]).
   Future<List<SessionSummary>> listSessions() => _sessionSummaries();
 
   /// Sub-plan 19 step 2: the latest survey of the same site before

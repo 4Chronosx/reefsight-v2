@@ -5,7 +5,9 @@ import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
+import '../services/session_files.dart';
 import '../services/session_summary.dart';
+import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
 import 'summary_screen.dart';
 import 'transect_setup_screen.dart';
@@ -13,13 +15,23 @@ import 'transect_setup_screen.dart';
 /// Sub-plan 6 (ui-ux-overhaul), step 4: the Surveys (history) tab -- every
 /// completed or incomplete session in SQLite, reachable for the first time
 /// since sub-plan 5 shipped (`TransectDatabase` had no `listSessions` before
-/// sub-plan 6 step 2). Read-only: no swipe-to-delete or long-press menu
-/// (decision 8 -- surveys are irreversible field data).
+/// sub-plan 6 step 2).
+///
+/// Long-press a card to delete that survey from this phone, after a
+/// confirm. Originally read-only (decision 8 -- surveys are irreversible
+/// field data); deleting is now allowed on the device only, see
+/// `docs/survey-deletion.md`. Long-press, not swipe, so a wet or gloved
+/// hand scrolling the list can't start it. No guard against deleting the
+/// survey Live is recording: Live is a full-screen route with
+/// `PopScope(canPop: false)` over this shell, so Surveys can't be reached
+/// mid-dive.
 class SurveysScreen extends StatefulWidget {
   const SurveysScreen({
     super.key,
     required this.dataRevision,
     this.openDatabase = openAppDatabase,
+    this.deleteFiles = deleteSessionFilesInDocuments,
+    this.onDataChanged,
   });
 
   /// Bumped by [AppShell] to force a reload -- see `app_shell.dart`'s doc
@@ -29,6 +41,14 @@ class SurveysScreen extends StatefulWidget {
   final int dataRevision;
 
   final DatabaseOpener openDatabase;
+
+  /// Removes a deleted survey's video, masks and photos.
+  final SessionFilesDeleter deleteFiles;
+
+  /// Called after a delete so [AppShell] bumps [dataRevision] -- Home's
+  /// recent-surveys strip reloads too. `null` (tests): Surveys reloads
+  /// only itself.
+  final VoidCallback? onDataChanged;
 
   @override
   State<SurveysScreen> createState() => _SurveysScreenState();
@@ -50,7 +70,9 @@ class _SurveysScreenState extends State<SurveysScreen> {
   void didUpdateWidget(covariant SurveysScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.dataRevision != widget.dataRevision) {
-      setState(() => _sessions = _load());
+      setState(() {
+        _sessions = _load();
+      });
     }
   }
 
@@ -79,6 +101,78 @@ class _SurveysScreenState extends State<SurveysScreen> {
       messenger.showSnackBar(SnackBar(content: Text('Export failed: $error')));
     } finally {
       if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  /// Long-press menu -> confirm -> delete. The DB delete is one transaction
+  /// (`TransectDatabase.deleteSession`); the files go after it commits, and
+  /// a failure there is logged, not shown -- the survey is already gone.
+  Future<void> _deleteSurvey(TransectSession session) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final chosen = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListTile(
+          leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
+          title: const Text('Delete survey', style: TextStyle(color: Colors.redAccent)),
+          onTap: () => Navigator.of(context).pop(true),
+        ),
+      ),
+    );
+    if (chosen != true || !mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete this survey?'),
+        content: Text(
+          '${session.siteName ?? 'Unnamed site'} · '
+          '${session.startedAt.toLocal().toString().substring(0, 16)}\n\n'
+          'Its colonies${session.recount == null ? '' : ', manual recount'}, '
+          "masks, photos and video are removed from this phone. This can't be undone.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      final db = await widget.openDatabase();
+      final TransectSession? deleted;
+      try {
+        deleted = await db.deleteSession(session.id!);
+      } finally {
+        await db.close();
+      }
+      if (deleted != null) {
+        try {
+          await widget.deleteFiles(deleted);
+        } catch (error) {
+          debugPrint('ReefSight: deleting survey ${session.id} files failed: $error');
+        }
+      }
+      messenger.showSnackBar(const SnackBar(content: Text('Survey deleted.')));
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text('Delete failed: $error')));
+    } finally {
+      final notify = widget.onDataChanged;
+      if (notify != null) {
+        notify();
+      } else if (mounted) {
+        setState(() {
+          _sessions = _load();
+        });
+      }
     }
   }
 
@@ -112,7 +206,10 @@ class _SurveysScreenState extends State<SurveysScreen> {
           return ListView.builder(
             padding: const EdgeInsets.all(16),
             itemCount: sessions.length,
-            itemBuilder: (context, i) => _SurveyCard(summary: sessions[i]),
+            itemBuilder: (context, i) => _SurveyCard(
+              summary: sessions[i],
+              onLongPress: () => _deleteSurvey(sessions[i].session),
+            ),
           );
         },
       ),
@@ -150,9 +247,10 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _SurveyCard extends StatelessWidget {
-  const _SurveyCard({required this.summary});
+  const _SurveyCard({required this.summary, required this.onLongPress});
 
   final SessionSummary summary;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -173,6 +271,7 @@ class _SurveyCard extends StatelessWidget {
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => SummaryScreen(sessionId: session.id!)),
         ),
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(

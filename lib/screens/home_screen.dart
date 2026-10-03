@@ -64,7 +64,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void didUpdateWidget(covariant HomeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.dataRevision != widget.dataRevision) {
-      setState(() => _recentSurveys = _loadRecentSurveys());
+      setState(() {
+        _recentSurveys = _loadRecentSurveys();
+      });
     }
   }
 

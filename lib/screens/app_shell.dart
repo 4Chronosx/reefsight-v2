@@ -83,7 +83,7 @@ class _AppShellState extends State<AppShell> with RouteAware {
         dataRevision: _dataRevision,
         onSeeAllSurveys: _openSurveysTab,
       ),
-      SurveysScreen(dataRevision: _dataRevision),
+      SurveysScreen(dataRevision: _dataRevision, onDataChanged: _refreshData),
       const SettingsScreen(),
     ];
 

@@ -69,6 +69,67 @@ void main() {
     }
   });
 
+  // The Live screen's right-hand stats panel (beside the 4:3 preview) stacks
+  // the tally: time, then one count per line, within the panel's ~200 dp.
+  testWidgets('vertical TallyHud stacks time and counts within a narrow panel',
+      (tester) async {
+    await tester.pumpWidget(
+      _wrapLandscape(
+        tester,
+        const Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 200,
+            child: TallyHud(
+              seenCount: 15,
+              healthyCount: 12,
+              bleachedCount: 3,
+              elapsed: Duration(minutes: 12, seconds: 4),
+              direction: Axis.vertical,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    final rows = [
+      for (final text in ['12:04', 'Seen ', 'Healthy ', 'Bleached '])
+        tester.getTopLeft(find.text(text)).dy,
+    ];
+    for (var i = 1; i < rows.length; i++) {
+      expect(rows[i], greaterThan(rows[i - 1]), reason: 'row $i below row ${i - 1}');
+    }
+    expect(find.text('15'), findsOneWidget);
+    expect(find.text('12'), findsOneWidget);
+    expect(find.text('3'), findsOneWidget);
+  });
+
+  testWidgets('vertical TallyHud with showCounts off shows elapsed time only',
+      (tester) async {
+    await tester.pumpWidget(
+      _wrapLandscape(
+        tester,
+        const SizedBox(
+          width: 200,
+          child: TallyHud(
+            seenCount: 5,
+            healthyCount: 3,
+            bleachedCount: 2,
+            elapsed: Duration(minutes: 2, seconds: 5),
+            showCounts: false,
+            direction: Axis.vertical,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('02:05'), findsOneWidget);
+    for (final hidden in ['5', '3', '2', 'Seen ', 'Healthy ', 'Bleached ']) {
+      expect(find.text(hidden), findsNothing, reason: hidden);
+    }
+  });
+
   testWidgets('end-transect sheet with no count asks without a number',
       (tester) async {
     await tester.pumpWidget(

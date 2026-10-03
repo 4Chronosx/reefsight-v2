@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -742,38 +743,54 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
         await _confirmEndTransect();
       },
       child: Scaffold(
+        backgroundColor: Colors.black,
         body: Stack(
           children: [
-            YOLOView(
-              controller: _yoloController,
-              modelPath: ModelAssets.stageBSegmentation,
-              task: YOLOTask.segment,
-              streamingConfig: const YOLOStreamingConfig.custom(
-                includeOriginalImage: true,
-                // Per-instance masks (mask-derived size, sub-plan 3 task 6)
-                // are opt-in -- without this, YOLOResult.mask stays null.
-                includeMasks: true,
-                // Caps both inference and how often a full camera frame is
-                // shipped over the platform channel -- Spec's "Target: 5-8
-                // fps" (ReefSight_Specification.md:88), not an arbitrary
-                // number.
-                inferenceFrequency: 8,
-              ),
-              onStreamingData: _handleStreamingData,
-              onModelError: (error, modelPath, task) {
-                debugPrint(
-                  'ReefSight: segmentation model error for $modelPath ($task): $error',
+            LayoutBuilder(
+              builder: (context, constraints) {
+                // The camera box is sized to the camera's 4:3 frame, so the
+                // native aspect-fill preview crops nothing: the diver sees
+                // exactly what is recorded and segmented. Full-screen, it
+                // cut ~a third of the frame off top and bottom. The spare
+                // width is the stats panel, never empty bars
+                // (docs/camera-lens-and-preview-framing.md). A phone too
+                // narrow for both shrinks the preview, never the panel.
+                final insets = MediaQuery.paddingOf(context);
+                final previewWidth = math.max(
+                  0.0,
+                  math.min(
+                    constraints.maxHeight * 4 / 3,
+                    constraints.maxWidth -
+                        insets.left -
+                        insets.right -
+                        _minStatsPanelWidth,
+                  ),
                 );
-                if (mounted) setState(() => _segmentationError = error.toString());
-              },
-              onModelLoad: (modelPath, task) {
-                debugPrint('ReefSight: segmentation model loaded: $modelPath ($task)');
-                if (mounted) {
-                  setState(() {
-                    _segmentationError = null;
-                    _modelLoaded = true;
-                  });
-                }
+                return Row(
+                  children: [
+                    // The notch / Dynamic Island side: keep the frame clear.
+                    SizedBox(width: insets.left),
+                    SizedBox(
+                      width: previewWidth,
+                      height: previewWidth * 3 / 4,
+                      child: Stack(
+                        children: [
+                          Positioned.fill(child: _buildCamera()),
+                          _buildDiagnostics(),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: SafeArea(
+                        left: false,
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: _buildStatsPanel(elapsed),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
               },
             ),
             // Loading state (sub-plan step 6): shown over `YOLOView`, which
@@ -801,160 +818,175 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
                   ),
                 ),
               ),
-            // Recording indicator, top-left -- decision 7's landscape HUD
-            // layout.
-            Positioned(
-              left: 12,
-              top: 12,
-              child: SafeArea(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    RecordingIndicator(
-                      isRecording: _recorder.isRecording,
-                      elapsed: elapsed,
-                      errorMessage: _recordingError,
-                    ),
-                    // Sub-plan 13 step 3: heat, battery or storage needing
-                    // attention -- beside the indicator, on the HUD edge,
-                    // never over the frame (sub-plan 06 decision 4).
-                    const SizedBox(width: 8),
-                    ValueListenableBuilder<DeviceHealth?>(
-                      valueListenable: _deviceHealth.health,
-                      builder: (context, health, _) => DeviceHealthBadge(health: health),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // Running tally, top edge -- Spec's "Live screen" line:
-            // "detection/segmentation overlay + a running tally (colonies
-            // seen, tentative healthy/bleached count)."
-            Positioned(
-              top: 12,
-              right: 12,
-              child: SafeArea(
-                child: TallyHud(
-                  seenCount: _firstSeenAt.length,
-                  healthyCount: _firstSeenAt.keys
-                      .where((id) =>
-                          _healthAggregator.currentLabel(id) ==
-                          HealthAggregator.healthyLabel)
-                      .length,
-                  bleachedCount: _firstSeenAt.keys
-                      .where((id) =>
-                          _healthAggregator.currentLabel(id) ==
-                          HealthAggregator.bleachedLabel)
-                      .length,
-                  elapsed: elapsed,
-                  showCounts: !widget.resultsHidden,
-                ),
-              ),
-            ),
-            // Error banners across the top -- never over the centre of the
-            // frame (decision 4).
-            if (_segmentationError != null || _persistError != null)
-              Positioned(
-                top: 64,
-                left: 12,
-                right: 12,
-                child: SafeArea(
-                  top: false,
-                  child: Column(
-                    children: [
-                      if (_segmentationError != null)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: LiveErrorBanner(
-                            message: 'Segmentation model error',
-                            detail: _segmentationError!,
-                          ),
-                        ),
-                      if (_persistError != null)
-                        LiveErrorBanner(
-                          message: 'Storage error',
-                          detail: _persistError!,
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            // Debug overlay (per-track list + seg timing): hidden by
-            // default, toggled from Settings ("Show diagnostics"), docked
-            // to the left edge when shown (sub-plan step 6).
-            ValueListenableBuilder<bool>(
-              valueListenable: AppSettings.instance.showDiagnostics,
-              builder: (context, showDiagnostics, _) {
-                // Sub-plan 14: suppressed for a "Recount planned" transect,
-                // whatever Settings says -- it lists health labels.
-                if (!showDiagnostics || widget.resultsHidden) {
-                  return const SizedBox.shrink();
-                }
-                return Positioned(
-                  left: 12,
-                  bottom: 12,
-                  child: SafeArea(
-                    child: DiagnosticsOverlay(
-                      segProcessingMs: _segProcessingMs,
-                      loopSummary: _loopSummary?.format(),
-                      tracks: _latestTracks,
-                      healthAggregator: _healthAggregator,
-                      sizesPx: _latestSizePx,
-                      checkpointFailures: _checkpointer?.failureCount ?? 0,
-                      thermal: _deviceHealth.health.value?.thermalLevel,
-                    ),
-                  ),
-                );
-              },
-            ),
-            // Large, glove-friendly End Transect control on the trailing
-            // (right) edge -- decision 7 (thumb rests on that side of the
-            // housing) and decision 4 (single destructive action, 64 dp).
-            Positioned(
-              right: 12,
-              bottom: 12,
-              child: SafeArea(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (_endTransectError != null)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 6),
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        constraints: const BoxConstraints(maxWidth: 240),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          'Failed to end transect: $_endTransectError',
-                          style: const TextStyle(color: Colors.redAccent, fontSize: 13),
-                        ),
-                      ),
-                    // Explicit width: the theme's ElevatedButton
-                    // `minimumSize` is `Size.fromHeight(...)` (infinite min
-                    // width), and this `Positioned` only pins right/bottom,
-                    // so without a bound the button can't lay out and never
-                    // paints -- the "no stop button" bug.
-                    SizedBox(
-                      width: 220,
-                      child: GloveButton(
-                        label: _endingTransect ? 'Ending...' : 'End Transect',
-                        icon: Icons.stop_circle_outlined,
-                        destructive: true,
-                        inWater: true,
-                        busy: _endingTransect,
-                        onPressed: _confirmEndTransect,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
           ],
         ),
       ),
+    );
+  }
+
+  /// Narrowest the stats panel gets: the indicator, the stacked tally and a
+  /// glove-sized End Transect at 16 sp (decision 4).
+  static const _minStatsPanelWidth = 200.0;
+
+  Widget _buildCamera() {
+    return YOLOView(
+      controller: _yoloController,
+      modelPath: ModelAssets.stageBSegmentation,
+      task: YOLOTask.segment,
+      streamingConfig: const YOLOStreamingConfig.custom(
+        includeOriginalImage: true,
+        // Per-instance masks (mask-derived size, sub-plan 3 task 6)
+        // are opt-in -- without this, YOLOResult.mask stays null.
+        includeMasks: true,
+        // Caps both inference and how often a full camera frame is
+        // shipped over the platform channel -- Spec's "Target: 5-8
+        // fps" (ReefSight_Specification.md:88), not an arbitrary
+        // number.
+        inferenceFrequency: 8,
+      ),
+      onStreamingData: _handleStreamingData,
+      onModelError: (error, modelPath, task) {
+        debugPrint(
+          'ReefSight: segmentation model error for $modelPath ($task): $error',
+        );
+        if (mounted) setState(() => _segmentationError = error.toString());
+      },
+      onModelLoad: (modelPath, task) {
+        debugPrint('ReefSight: segmentation model loaded: $modelPath ($task)');
+        if (mounted) {
+          setState(() {
+            _segmentationError = null;
+            _modelLoaded = true;
+          });
+        }
+      },
+    );
+  }
+
+  /// Debug overlay (per-track list + seg timing): hidden by default, toggled
+  /// from Settings ("Show diagnostics"), docked to the frame's bottom-left
+  /// when shown (sub-plan step 6) -- the one HUD element over the frame.
+  Widget _buildDiagnostics() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: AppSettings.instance.showDiagnostics,
+      builder: (context, showDiagnostics, _) {
+        // Sub-plan 14: suppressed for a "Recount planned" transect,
+        // whatever Settings says -- it lists health labels.
+        if (!showDiagnostics || widget.resultsHidden) {
+          return const SizedBox.shrink();
+        }
+        return Positioned(
+          left: 12,
+          bottom: 12,
+          child: DiagnosticsOverlay(
+            segProcessingMs: _segProcessingMs,
+            loopSummary: _loopSummary?.format(),
+            tracks: _latestTracks,
+            healthAggregator: _healthAggregator,
+            sizesPx: _latestSizePx,
+            checkpointFailures: _checkpointer?.failureCount ?? 0,
+            thermal: _deviceHealth.health.value?.thermalLevel,
+          ),
+        );
+      },
+    );
+  }
+
+  /// The right-hand panel beside the 4:3 frame: every HUD element except
+  /// diagnostics, so none of them covers the frame (sub-plan 06 decision 4).
+  Widget _buildStatsPanel(Duration elapsed) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Recording indicator first -- decision 7's landscape HUD layout.
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            RecordingIndicator(
+              isRecording: _recorder.isRecording,
+              elapsed: elapsed,
+              errorMessage: _recordingError,
+            ),
+            // Sub-plan 13 step 3: heat, battery or storage needing
+            // attention -- beside the indicator, never over the frame.
+            ValueListenableBuilder<DeviceHealth?>(
+              valueListenable: _deviceHealth.health,
+              builder: (context, health, _) => DeviceHealthBadge(health: health),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        // Running tally -- Spec's "Live screen" line: "detection/
+        // segmentation overlay + a running tally (colonies seen, tentative
+        // healthy/bleached count)."
+        TallyHud(
+          seenCount: _firstSeenAt.length,
+          healthyCount: _firstSeenAt.keys
+              .where((id) =>
+                  _healthAggregator.currentLabel(id) == HealthAggregator.healthyLabel)
+              .length,
+          bleachedCount: _firstSeenAt.keys
+              .where((id) =>
+                  _healthAggregator.currentLabel(id) == HealthAggregator.bleachedLabel)
+              .length,
+          elapsed: elapsed,
+          showCounts: !widget.resultsHidden,
+          direction: Axis.vertical,
+        ),
+        const SizedBox(height: 12),
+        // Error banners -- in the panel, never over the frame (decision
+        // 4). Scrolls, so long details never push End Transect off-screen.
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              children: [
+                if (_segmentationError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: LiveErrorBanner(
+                      message: 'Segmentation model error',
+                      detail: _segmentationError!,
+                    ),
+                  ),
+                if (_persistError != null)
+                  LiveErrorBanner(
+                    message: 'Storage error',
+                    detail: _persistError!,
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (_endTransectError != null)
+          Container(
+            margin: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              'Failed to end transect: $_endTransectError',
+              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+            ),
+          ),
+        // Large, glove-friendly End Transect at the bottom of the trailing
+        // (right) edge -- decision 7 (thumb rests on that side of the
+        // housing) and decision 4 (single destructive action, 64 dp). The
+        // panel's stretch gives it a bounded width; the theme's
+        // `minimumSize` is `Size.fromHeight(...)` (infinite min width), so
+        // unbounded it can't lay out -- the old "no stop button" bug.
+        GloveButton(
+          label: _endingTransect ? 'Ending...' : 'End Transect',
+          icon: Icons.stop_circle_outlined,
+          destructive: true,
+          inWater: true,
+          busy: _endingTransect,
+          onPressed: _confirmEndTransect,
+        ),
+      ],
     );
   }
 }

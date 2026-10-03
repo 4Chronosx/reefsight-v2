@@ -75,7 +75,7 @@ void main() {
     // Newest-started-first: Newer Site's card renders before Older Site's.
     expect(siteTexts, ['Newer Site', 'Older Site']);
 
-    // No delete affordance anywhere on the screen (decision 8).
+    // No delete button on the cards: deleting is behind a long-press.
     expect(find.byIcon(Icons.delete), findsNothing);
     expect(find.byIcon(Icons.delete_outline), findsNothing);
 
@@ -263,5 +263,114 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(message, findsOneWidget);
+  });
+
+  // Survey deletion (phone only): long-press -> "Delete survey" -> confirm.
+  // File-backed for the same reason as the export test.
+  group('deleting a survey', () {
+    late Directory dir;
+    late List<int?> filesDeletedFor;
+
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('reefsight_surveys_delete_');
+      filesDeletedFor = [];
+    });
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    Future<void> pumpUntil(WidgetTester tester, Finder finder, {bool gone = false}) async {
+      for (var i = 0; i < 50 && finder.evaluate().isEmpty != gone; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+    }
+
+    // DB I/O inside `runAsync` (real SQLite); the gestures outside it, on
+    // the fake clock -- a long-press timer started inside `runAsync` is a
+    // real timer the pumps never fire, so the press lands as a tap.
+    Future<void> seedAndOpen(WidgetTester tester) async {
+      await tester.runAsync(() async {
+        final db = await TransectDatabase.open(dir.path);
+        for (final (day, site) in [(1, 'Keep Site'), (2, 'Drop Site')]) {
+          final id = await db.insertSession(
+            TransectSession(startedAt: DateTime.utc(2026, 1, day), tapeLengthMeters: 50, siteName: site),
+          );
+          await db.upsertColony(
+            TrackedColonyRecord(
+              sessionId: id,
+              trackId: 1,
+              healthHistory: const [],
+              firstSeenAt: DateTime.utc(2026, 1, day),
+              lastSeenAt: DateTime.utc(2026, 1, day),
+            ),
+          );
+        }
+        await db.close();
+
+        await tester.pumpWidget(
+          _wrap(SurveysScreen(
+            dataRevision: 0,
+            openDatabase: () => TransectDatabase.open(dir.path),
+            deleteFiles: (session) async => filesDeletedFor.add(session.id),
+          )),
+        );
+        await pumpUntil(tester, find.text('Drop Site'));
+      });
+
+      await tester.longPress(find.text('Drop Site'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete survey'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<List<String?>> remainingSites() async {
+      final db = await TransectDatabase.open(dir.path);
+      try {
+        return [for (final s in await db.listSessions()) s.session.siteName];
+      } finally {
+        await db.close();
+      }
+    }
+
+    testWidgets('confirming removes it from the list, the DB and its files', (tester) async {
+      late List<String?> sites;
+      await seedAndOpen(tester);
+      expect(find.textContaining("can't be undone"), findsOneWidget);
+
+      // Tapped inside `runAsync`, like the export test: the delete's DB
+      // open/close must run on the real clock, or sqflite's open lock is
+      // still held when `remainingSites` opens the file.
+      await tester.runAsync(() async {
+        await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+        // Wait on the deleted card first: "Keep Site" and "no spinner" are
+        // both already true before the delete runs, so waiting on them alone
+        // raced the delete. Then until the reloaded list is up -- the
+        // reload's spinner would keep `pumpAndSettle` from settling.
+        await pumpUntil(tester, find.text('Drop Site'), gone: true);
+        await pumpUntil(tester, find.byType(CircularProgressIndicator), gone: true);
+        await pumpUntil(tester, find.text('Keep Site'));
+        sites = await remainingSites();
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('Drop Site'), findsNothing);
+      expect(find.text('Survey deleted.'), findsOneWidget);
+      expect(find.text('Keep Site'), findsOneWidget);
+      expect(sites, ['Keep Site']);
+      expect(filesDeletedFor, hasLength(1));
+    });
+
+    testWidgets('cancelling keeps it', (tester) async {
+      late List<String?> sites;
+      await seedAndOpen(tester);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete this survey?'), findsNothing);
+      await tester.runAsync(() async => sites = await remainingSites());
+
+      expect(find.text('Drop Site'), findsOneWidget);
+      expect(sites, ['Drop Site', 'Keep Site']);
+      expect(filesDeletedFor, isEmpty);
+    });
   });
 }

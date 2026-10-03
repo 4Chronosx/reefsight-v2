@@ -95,6 +95,9 @@ Concrete gaps:
    error banners across the top without covering the centre of the frame.
 8. **Surveys can't be deleted, from any screen.** They're irreversible field data. The app has no delete
    or clear action for sessions (decided 2026-09-28).
+   *Amended 2026-10-03:* a survey can now be deleted **on the phone only**, one at a time, by
+   long-pressing it in Surveys and confirming. There's still no clear-all action, and cloud sync
+   stays append-only. See `docs/survey-deletion.md`.
 9. **Photo provenance is deferred.** Use v1's `deep-sea.jpg`, `healthy_coral.png`, and
    `bleached_coral.png` as-is. Tracking where they came from isn't required for this sub-plan
    (2026-09-28).
