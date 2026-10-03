@@ -37,8 +37,9 @@ class TransectDatabase {
   /// entry/exit GPS fix columns (sub-plan 12). 6 -> 7 added the hidden-
   /// results and manual recount columns (sub-plan 14). 7 -> 8 added
   /// `video_started_at` (sub-plan 16: colony video jump). 8 -> 9 added the
-  /// colony photo columns to `tracked_colonies` (sub-plan 18).
-  static const _schemaVersion = 9;
+  /// colony photo columns to `tracked_colonies` (sub-plan 18). 9 -> 10
+  /// added the session's classifier settings (crop style + thresholds).
+  static const _schemaVersion = 10;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -100,7 +101,8 @@ class TransectDatabase {
         thermal_rise_count INTEGER,
         ${_fixColumnsSql('entry')},
         ${_fixColumnsSql('exit')},
-        ${_recountColumns.join(',\n        ')}
+        ${_recountColumns.join(',\n        ')},
+        ${_settingsColumns.join(',\n        ')}
       )
     ''');
     await db.execute('''
@@ -128,7 +130,8 @@ class TransectDatabase {
   /// added `thermal_peak`/`thermal_rise_count`, 5 -> 6 added the
   /// `entry_*`/`exit_*` GPS fix columns, 6 -> 7 added `results_hidden`,
   /// `results_revealed_at` and the `recount_*` columns, 7 -> 8 added
-  /// `video_started_at`, 8 -> 9 added the `photo_*` colony columns.
+  /// `video_started_at`, 8 -> 9 added the `photo_*` colony columns, 9 -> 10
+  /// added `crop_style` and the `threshold_*` session columns.
   /// Nullable `ALTER TABLE ... ADD COLUMN` is safe on existing rows (they
   /// read back as `null`, matching `TransectSession.fromMap`'s
   /// already-nullable handling of every added column).
@@ -174,7 +177,22 @@ class TransectDatabase {
         await db.execute('ALTER TABLE $_coloniesTable ADD COLUMN $column');
       }
     }
+    if (oldVersion < 10) {
+      for (final column in _settingsColumns) {
+        await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN $column');
+      }
+    }
   }
+
+  /// v10: the classifier settings a session ran with -- names match
+  /// `TransectSession.toMap` and `ClassificationThresholds.toColumns`.
+  static const _settingsColumns = [
+    'crop_style TEXT',
+    'threshold_seg_floor REAL',
+    'threshold_min_coverage REAL',
+    'threshold_conf_floor REAL',
+    'threshold_min_samples INTEGER',
+  ];
 
   /// Sub-plan 18's columns -- names match `TrackedColonyRecord.toMap`.
   /// Paths are relative to the documents directory.

@@ -28,7 +28,8 @@ class LiveDetectionPayload {
   final List<List<double>>? mask;
 
   /// The segmentation confidence of this detection, gated against
-  /// `ClassificationPolicy.classifySegFloor` before classifying (sub-plan 10).
+  /// [LiveFrameProcessor.thresholds]' `segFloor` before classifying
+  /// (sub-plan 10).
   final double score;
 }
 
@@ -58,6 +59,9 @@ class LiveFrameProcessor {
     this.metrics,
     this.useLegacyLoop = false,
     this.cropStyle = CropStyle.insideMaskSquare,
+    this.thresholds = ClassificationThresholds.defaults,
+    this.cutContextPhotos,
+    this.onContextPhoto,
     Duration reclassifyEvery = const Duration(seconds: 1),
     int maxPerFrame = 3,
     DateTime Function()? now,
@@ -66,7 +70,10 @@ class LiveFrameProcessor {
        _now = now ?? DateTime.now {
     _scheduler = ClassificationScheduler(
       classify: classify,
-      onResult: onHealth,
+      // A track is only offered while no batch is in flight, so its stored
+      // overlay is the one from the frame this result was cut from.
+      onResult: (trackId, result, sampledAt) =>
+          onHealth(trackId, result.withOverlay(_overlays[trackId]), sampledAt),
       reclassifyEvery: reclassifyEvery,
       maxPerFrame: maxPerFrame,
       onBatchComplete: (elapsed, n) =>
@@ -86,6 +93,10 @@ class LiveFrameProcessor {
   /// How classifier crops are cut (sub-plan 10). Fixed per session, like
   /// [useLegacyLoop]. Ignored by the legacy loop, which keeps its old crop.
   final CropStyle cropStyle;
+
+  /// The segmentation floor and coverage gate applied in [_candidates].
+  /// Fixed per session, like [cropStyle].
+  final ClassificationThresholds thresholds;
 
   final DateTime Function() _now;
   late final ClassificationScheduler _scheduler;
@@ -109,6 +120,35 @@ class LiveFrameProcessor {
   onHealth;
 
   final LiveLoopMetrics? metrics;
+
+  /// Cuts context photos (detection box x1.5) from a frame without
+  /// classifying them. With [onContextPhoto], each confirmed track gets one
+  /// such photo, independent of the classifier: the fallback so a colony
+  /// the classifier never labelled still has a photo in the report.
+  final Future<List<Uint8List?>> Function(Uint8List frameBytes, List<PixelRegion> regions)?
+  cutContextPhotos;
+
+  /// Called with each track's fallback photo from [cutContextPhotos], and
+  /// its frame's mask overlay (`null` without a mask).
+  final void Function(int trackId, Uint8List photo, MaskOverlay? overlay)? onContextPhoto;
+
+  /// Each offered candidate's mask overlay (sub-plan 18), attached to its
+  /// classification result.
+  final Map<int, MaskOverlay> _overlays = {};
+
+  /// Tracks with a fallback photo taken, in flight, or given up on. A failed
+  /// cut is removed again so the track is retried on a later frame, up to
+  /// [maxContextPhotoAttempts] cuts per track -- a frame that never decodes
+  /// must not cost a full-frame decode on every event.
+  final Set<int> _contextPhotoTaken = {};
+  final Map<int, int> _contextPhotoAttempts = {};
+
+  /// Cuts tried per track before its fallback photo is given up on.
+  static const maxContextPhotoAttempts = 3;
+  Future<void>? _contextPhotoInFlight;
+
+  /// At most this many fallback photos are cut from one frame.
+  static const maxContextPhotosPerFrame = 3;
 
   bool _closed = false;
   Future<void>? _legacyInFlight;
@@ -142,6 +182,7 @@ class LiveFrameProcessor {
     final tracks = _tracker.update(detections);
     metrics?.recordTrackerUpdate();
     onTracks(tracks);
+    if (frame != null) _takeContextPhotos(tracks, frame);
 
     // A busy scheduler would refuse the offer anyway, so skip the crop work.
     if (frame == null || _scheduler.isBusy) return;
@@ -153,6 +194,71 @@ class LiveFrameProcessor {
       candidates: _candidates(tracks, frame.width, frame.height, sampledAt),
       sampledAt: sampledAt,
     );
+  }
+
+  /// Cuts a fallback photo for each confirmed track that has none yet, one
+  /// batch at a time. Not gated on score, mask or coverage: it's the photo
+  /// for a colony the classifier may never have accepted.
+  void _takeContextPhotos(
+    List<STrack> tracks,
+    ({Uint8List bytes, int width, int height}) frame,
+  ) {
+    final cut = cutContextPhotos;
+    final deliver = onContextPhoto;
+    if (cut == null || deliver == null || _contextPhotoInFlight != null) return;
+
+    final trackIds = <int>[];
+    final regions = <PixelRegion>[];
+    final overlays = <MaskOverlay?>[];
+    for (final track in tracks) {
+      final payload = track.payload;
+      if (!track.isActivated || payload is! LiveDetectionPayload) continue;
+      if (_contextPhotoTaken.contains(track.trackId)) continue;
+      final r = computeContextRegion(
+        payload.box,
+        frameWidth: frame.width,
+        frameHeight: frame.height,
+      );
+      trackIds.add(track.trackId);
+      regions.add((left: r.left, top: r.top, width: r.width, height: r.height));
+      final mask = payload.mask;
+      overlays.add(
+        mask == null ? null : MaskOverlay(mask: mask, box: payload.box, contextRegion: r),
+      );
+      if (trackIds.length >= maxContextPhotosPerFrame) break;
+    }
+    if (trackIds.isEmpty) return;
+
+    _contextPhotoTaken.addAll(trackIds);
+    for (final id in trackIds) {
+      _contextPhotoAttempts[id] = (_contextPhotoAttempts[id] ?? 0) + 1;
+    }
+    // Retry later, unless this track has used up its attempts.
+    void failed(int id) {
+      if (_contextPhotoAttempts[id]! < maxContextPhotoAttempts) {
+        _contextPhotoTaken.remove(id);
+      }
+    }
+
+    _contextPhotoInFlight = () async {
+      List<Uint8List?> photos;
+      try {
+        photos = await cut(frame.bytes, regions);
+      } catch (error) {
+        debugPrint('ReefSight: context photo cut failed: $error');
+        trackIds.forEach(failed);
+        return;
+      }
+      if (photos.isEmpty) debugPrint('ReefSight: context photo frame did not decode');
+      for (var i = 0; i < trackIds.length; i++) {
+        final photo = i < photos.length ? photos[i] : null;
+        if (photo == null) {
+          failed(trackIds[i]);
+        } else if (!_closed) {
+          deliver(trackIds[i], photo, overlays[i]);
+        }
+      }
+    }().whenComplete(() => _contextPhotoInFlight = null);
   }
 
   /// This frame's classifiable tracks, each with the crop window to classify
@@ -172,7 +278,7 @@ class LiveFrameProcessor {
     for (final track in tracks) {
       final payload = track.payload;
       if (!track.isActivated || payload is! LiveDetectionPayload) continue;
-      if (payload.score < ClassificationPolicy.classifySegFloor) continue;
+      if (payload.score < thresholds.segFloor) continue;
       if (!_scheduler.isDue(track.trackId, at)) continue;
       final retryAt = _insufficientRetryAt[track.trackId];
       if (retryAt != null && at.isBefore(retryAt)) continue;
@@ -186,7 +292,7 @@ class LiveFrameProcessor {
       );
       if (crop == null ||
           (cropStyle == CropStyle.insideMaskSquare &&
-              crop.coverage < ClassificationPolicy.minCoverage)) {
+              crop.coverage < thresholds.minCoverage)) {
         metrics?.recordInsufficientView();
         _insufficientRetryAt[track.trackId] = at.add(insufficientViewRetry);
         continue;
@@ -198,6 +304,27 @@ class LiveFrameProcessor {
           contextBox: payload.box,
         ),
       );
+      // The regions as the classifier will cut them (`classifyBatch`), so
+      // the overlay lines up with both photos.
+      final mask = payload.mask;
+      if (mask == null) {
+        _overlays.remove(track.trackId);
+      } else {
+        _overlays[track.trackId] = MaskOverlay(
+          mask: mask,
+          box: payload.box,
+          contextRegion: computeContextRegion(
+            payload.box,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight,
+          ),
+          cropRegion: computeCropRegion(
+            crop.window,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight,
+          ),
+        );
+      }
     }
     return candidates;
   }
@@ -256,6 +383,8 @@ class LiveFrameProcessor {
     } catch (_) {
       // `_handleLegacy` already logs; close() must still let dispose proceed.
     }
+    // Never throws: `_takeContextPhotos` catches the cut's errors itself.
+    await _contextPhotoInFlight;
   }
 
   /// Parses the plugin's raw detection maps into tracker detections.

@@ -326,4 +326,38 @@ void main() {
       expect(region.top + region.height, 480);
     });
   });
+
+  // The mask overlay's point lookup must agree with the coverage gate's
+  // box-local cell mapping, so one fix (sub-plan 10 step 0) moves both.
+  group('maskCoversPoint', () {
+    // 2x2 grid over a 100x100 box at (100, 50): only the top-left cell.
+    final mask = [
+      [1.0, 0.0],
+      [0.0, 0.0],
+    ];
+    const box = Rect.fromLTWH(100, 50, 100, 100);
+
+    test('a point in a foreground cell is covered', () {
+      expect(maskCoversPoint(mask, box, 125, 75), isTrue);
+    });
+
+    test('a point in a background cell is not', () {
+      expect(maskCoversPoint(mask, box, 175, 75), isFalse);
+      expect(maskCoversPoint(mask, box, 125, 125), isFalse);
+    });
+
+    test('a point outside the box is not', () {
+      expect(maskCoversPoint(mask, box, 99, 75), isFalse);
+      expect(maskCoversPoint(mask, box, 125, 150), isFalse);
+    });
+
+    test('an empty mask covers nothing', () {
+      expect(maskCoversPoint(const [], box, 125, 75), isFalse);
+    });
+  });
+
+  test('scaledToLongSide keeps the aspect, longest side as given', () {
+    expect(scaledToLongSide(640, 480, 320), (width: 320, height: 240));
+    expect(scaledToLongSide(100, 300, 320), (width: 107, height: 320));
+  });
 }

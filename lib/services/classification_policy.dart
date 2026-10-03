@@ -25,3 +25,82 @@ abstract final class ClassificationPolicy {
   /// confident samples.
   static const int minConfidentSamples = 2;
 }
+
+/// The [ClassificationPolicy] thresholds as one value, so Settings ->
+/// Diagnostics can override them for a transect (a comparison tool, like
+/// the crop style). [defaults] is the policy itself.
+class ClassificationThresholds {
+  const ClassificationThresholds({
+    this.segFloor = ClassificationPolicy.classifySegFloor,
+    this.minCoverage = ClassificationPolicy.minCoverage,
+    this.confFloor = ClassificationPolicy.classifyConfFloor,
+    this.minConfidentSamples = ClassificationPolicy.minConfidentSamples,
+  });
+
+  static const ClassificationThresholds defaults = ClassificationThresholds();
+
+  final double segFloor;
+  final double minCoverage;
+  final double confFloor;
+  final int minConfidentSamples;
+
+  bool get isDefault => this == defaults;
+
+  ClassificationThresholds copyWith({
+    double? segFloor,
+    double? minCoverage,
+    double? confFloor,
+    int? minConfidentSamples,
+  }) => ClassificationThresholds(
+    segFloor: segFloor ?? this.segFloor,
+    minCoverage: minCoverage ?? this.minCoverage,
+    confFloor: confFloor ?? this.confFloor,
+    minConfidentSamples: minConfidentSamples ?? this.minConfidentSamples,
+  );
+
+  /// Stored per session (schema v10) -- names match `transect_database.dart`'s
+  /// `transect_sessions` columns, like `GeoFix.toColumns`.
+  Map<String, Object?> toColumns() => {
+    'threshold_seg_floor': segFloor,
+    'threshold_min_coverage': minCoverage,
+    'threshold_conf_floor': confFloor,
+    'threshold_min_samples': minConfidentSamples,
+  };
+
+  static const Map<String, Object?> nullColumns = {
+    'threshold_seg_floor': null,
+    'threshold_min_coverage': null,
+    'threshold_conf_floor': null,
+    'threshold_min_samples': null,
+  };
+
+  /// `null` for a session recorded before schema v10.
+  static ClassificationThresholds? fromColumns(Map<String, Object?> map) {
+    final seg = map['threshold_seg_floor'] as num?;
+    final coverage = map['threshold_min_coverage'] as num?;
+    final conf = map['threshold_conf_floor'] as num?;
+    final samples = map['threshold_min_samples'] as int?;
+    if (seg == null || coverage == null || conf == null || samples == null) return null;
+    return ClassificationThresholds(
+      segFloor: seg.toDouble(),
+      minCoverage: coverage.toDouble(),
+      confFloor: conf.toDouble(),
+      minConfidentSamples: samples,
+    );
+  }
+
+  /// For the debug log, e.g. `seg 0.4 cov 0.6 conf 0.7 n 2`.
+  String format() =>
+      'seg $segFloor cov $minCoverage conf $confFloor n $minConfidentSamples';
+
+  @override
+  bool operator ==(Object other) =>
+      other is ClassificationThresholds &&
+      other.segFloor == segFloor &&
+      other.minCoverage == minCoverage &&
+      other.confFloor == confFloor &&
+      other.minConfidentSamples == minConfidentSamples;
+
+  @override
+  int get hashCode => Object.hash(segFloor, minCoverage, confFloor, minConfidentSamples);
+}

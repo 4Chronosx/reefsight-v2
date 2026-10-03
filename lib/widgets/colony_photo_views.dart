@@ -68,7 +68,12 @@ class BleachedColonyStrip extends StatelessWidget {
                   final file = photos.context[colony.trackId]!;
                   return GestureDetector(
                     key: ValueKey('bleached-photo-${colony.trackId}'),
-                    onTap: () => _showEnlarged(context, colony.trackId, file),
+                    onTap: () => _showEnlarged(
+                      context,
+                      colony.trackId,
+                      file,
+                      photos.contextMask[colony.trackId],
+                    ),
                     child: _PhotoImage(file: file, size: 96),
                   );
                 },
@@ -87,34 +92,45 @@ class BleachedColonyStrip extends StatelessWidget {
     );
   }
 
-  static void _showEnlarged(BuildContext context, int trackId, File file) {
+  static void _showEnlarged(BuildContext context, int trackId, File file, File? mask) {
+    var showMask = true;
     showDialog<void>(
       context: context,
-      builder: (context) => Dialog(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
-                'Colony #$trackId',
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => Dialog(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Text(
+                  'Colony #$trackId',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                ),
               ),
-            ),
-            InteractiveViewer(
-              maxScale: 4,
-              child: Image.file(
-                file,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) =>
-                    const SizedBox(height: 200, child: Center(child: Icon(Icons.broken_image))),
+              InteractiveViewer(
+                maxScale: 4,
+                child: _MaskedPhoto(
+                  photo: Image.file(
+                    file,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) => const SizedBox(
+                      height: 200,
+                      child: Center(child: Icon(Icons.broken_image)),
+                    ),
+                  ),
+                  mask: showMask ? mask : null,
+                  maskKey: const ValueKey('photo-mask-context'),
+                ),
               ),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Close'),
-            ),
-          ],
+              if (mask != null)
+                _MaskToggle(value: showMask, onChanged: (v) => setState(() => showMask = v)),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -130,6 +146,9 @@ class ColonyThumbnail extends StatelessWidget {
     required this.photo,
     this.crop,
     this.size = 32,
+    this.confidenceFloor = ClassificationPolicy.classifyConfFloor,
+    this.photoMask,
+    this.cropMask,
   });
 
   final TrackedColonyRecord colony;
@@ -137,12 +156,28 @@ class ColonyThumbnail extends StatelessWidget {
   final File? crop;
   final double size;
 
+  /// The colony's mask overlays for [photo] and [crop], shown in the
+  /// detail (too small to read on the thumbnail itself).
+  final File? photoMask;
+  final File? cropMask;
+
+  /// The session's confidence floor, for the detail's uncertain-sample note.
+  final double confidenceFloor;
+
   @override
   Widget build(BuildContext context) {
     // The padding brings the tap target to 48 px around a 32 px image.
     return InkWell(
       key: ValueKey('colony-thumbnail-${colony.trackId}'),
-      onTap: () => showColonyPhotoDetail(context, colony, photo: photo, crop: crop),
+      onTap: () => showColonyPhotoDetail(
+        context,
+        colony,
+        photo: photo,
+        crop: crop,
+        confidenceFloor: confidenceFloor,
+        photoMask: photoMask,
+        cropMask: cropMask,
+      ),
       borderRadius: BorderRadius.circular(4),
       child: Padding(
         padding: const EdgeInsets.all(8),
@@ -160,13 +195,20 @@ Future<void> showColonyPhotoDetail(
   TrackedColonyRecord colony, {
   required File photo,
   File? crop,
+  double confidenceFloor = ClassificationPolicy.classifyConfFloor,
+  File? photoMask,
+  File? cropMask,
 }) {
   final label = colony.photoLabel;
-  final confidence = colony.photoConfidence;
-  final uncertain =
-      confidence != null && confidence < ClassificationPolicy.classifyConfFloor;
+  final unclassified = label == BestColonyPhoto.unclassifiedLabel;
+  final confidence = unclassified ? null : colony.photoConfidence;
+  // Against the floor the session ran with (its stored thresholds), so a
+  // comparison run's note matches how the sample was actually counted.
+  final uncertain = confidence != null && confidence < confidenceFloor;
+  final hasMask = photoMask != null || (crop != null && cropMask != null);
+  var showMask = true;
 
-  Widget panel(String title, File? file) => Expanded(
+  Widget panel(String title, File? file, File? mask, String maskId) => Expanded(
     child: Column(
       children: [
         Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
@@ -175,7 +217,11 @@ Future<void> showColonyPhotoDetail(
           aspectRatio: 1,
           child: file == null
               ? const Center(child: Text('—'))
-              : _PhotoImage(file: file, fit: BoxFit.contain),
+              : _MaskedPhoto(
+                  photo: _PhotoImage(file: file, fit: BoxFit.contain),
+                  mask: showMask ? mask : null,
+                  maskKey: ValueKey('photo-mask-$maskId'),
+                ),
         ),
       ],
     ),
@@ -183,7 +229,8 @@ Future<void> showColonyPhotoDetail(
 
   return showDialog<void>(
     context: context,
-    builder: (dialogContext) => AlertDialog(
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
       title: Text('Colony #${colony.trackId}'),
       content: SizedBox(
         width: 480,
@@ -194,16 +241,24 @@ Future<void> showColonyPhotoDetail(
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                panel('Context', photo),
+                panel('Context', photo, photoMask, 'context'),
                 const SizedBox(width: 8),
-                panel('Classifier input', crop),
+                panel('Classifier input', crop, cropMask, 'crop'),
               ],
             ),
+            if (hasMask)
+              _MaskToggle(value: showMask, onChanged: (v) => setState(() => showMask = v)),
             const SizedBox(height: 12),
             if (label != null && confidence != null)
               Text(
                 '${_labelText(label)} · confidence ${confidence.toStringAsFixed(2)}',
                 style: const TextStyle(fontSize: 14),
+              ),
+            if (unclassified)
+              const Text(
+                'Not classified: the classifier returned no result for this colony. '
+                'Photo cut from its detection box.',
+                style: TextStyle(fontSize: 14),
               ),
             if (uncertain)
               Padding(
@@ -225,7 +280,59 @@ Future<void> showColonyPhotoDetail(
           child: const Text('Close'),
         ),
       ],
+      ),
     ),
+  );
+}
+
+/// [photo] with the colony's mask overlay ([mask], a transparent PNG the
+/// photo's size) drawn over it. Both fill the same box with
+/// [BoxFit.contain] and share an aspect ratio, so they line up exactly.
+/// `null` [mask] shows the photo alone.
+class _MaskedPhoto extends StatelessWidget {
+  const _MaskedPhoto({required this.photo, required this.mask, required this.maskKey});
+
+  final Widget photo;
+  final File? mask;
+  final Key maskKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final mask = this.mask;
+    if (mask == null) return photo;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        photo,
+        Positioned.fill(
+          child: Image.file(
+            mask,
+            key: maskKey,
+            fit: BoxFit.contain,
+            // A missing overlay just shows the bare photo.
+            errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Shows or hides the colony outline, in the photo detail and enlarged view.
+class _MaskToggle extends StatelessWidget {
+  const _MaskToggle({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) => SwitchListTile(
+    key: const ValueKey('mask-toggle'),
+    contentPadding: EdgeInsets.zero,
+    dense: true,
+    title: const Text('Outline colony'),
+    value: value,
+    onChanged: onChanged,
   );
 }
 

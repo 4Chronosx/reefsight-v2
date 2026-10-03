@@ -56,6 +56,10 @@ class BoTSortTracker {
   /// reference's `output_stracks`.
   List<STrack> get tracks => List.unmodifiable(_trackedStracks);
 
+  /// Size of the internal removed-tracks list. Diagnostic only (sub-plan 08
+  /// step 5 asserts it stays bounded over long transects).
+  int get removedTrackCount => _removedStracks.length;
+
   /// Advances the tracker by one frame given this frame's [detections].
   /// Pass [frame] to enable camera motion compensation for this call (only
   /// takes effect if [cameraMotionCompensator] was also provided at
@@ -231,6 +235,22 @@ class BoTSortTracker {
     );
     _trackedStracks = dedupedTracked;
     _lostStracks = dedupedLost;
+
+    // Bound `_removedStracks` (sub-plan 08 step 5). Its only use is the
+    // by-id `subTracks(_lostStracks, _removedStracks)` above, and ids only
+    // enter `_lostStracks` from tracks already in `_trackedStracks` or
+    // `_lostStracks` -- new detections always get fresh ids. So an entry whose
+    // id is in neither list can never affect output again and is dropped;
+    // everything else is kept, including the reference's quirk of a track
+    // re-found one update after removal whose stale entry still matters if it
+    // is lost again later. Unbounded (as in the Python reference) the list
+    // grows for the whole transect; the output is identical either way
+    // (test/tracking/removed_stracks_bound_test.dart).
+    final liveIds = {
+      for (final t in _trackedStracks) t.trackId,
+      for (final t in _lostStracks) t.trackId,
+    };
+    _removedStracks.removeWhere((t) => !liveIds.contains(t.trackId));
 
     return List.unmodifiable(_trackedStracks);
   }

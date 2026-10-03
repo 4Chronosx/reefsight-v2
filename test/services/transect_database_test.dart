@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:reefsight_mobile/services/classification_policy.dart';
+import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
@@ -1146,6 +1148,13 @@ void main() {
         version: 8,
         singleInstance: false,
         onCreate: (db, version) async {
+          // Present in every real v8 file; later upgrades (v10) alter it.
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL
+            )
+          ''');
           await db.execute('''
             CREATE TABLE tracked_colonies (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1211,6 +1220,71 @@ void main() {
       expect(colony.photoCropPath, 'colony_photos/session2_track9_crop.jpg');
       expect(colony.photoLabel, 'CORAL_BL');
       expect(colony.photoConfidence, 0.91);
+    });
+  });
+
+  // Each session stores the crop style and thresholds it ran with, so a
+  // comparison run's report says what produced it.
+  group('TransectDatabase schema v10', () {
+    test('a session\'s crop style and thresholds round-trip', () async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      const thresholds = ClassificationThresholds(
+        segFloor: 0.5,
+        minCoverage: 0.4,
+        confFloor: 0.65,
+        minConfidentSamples: 1,
+      );
+
+      final id = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, 1),
+          tapeLengthMeters: 50,
+          cropStyle: CropStyle.boxStretch,
+          thresholds: thresholds,
+        ),
+      );
+
+      final session = (await db.sessionById(id))!;
+      expect(session.cropStyle, CropStyle.boxStretch);
+      expect(session.thresholds, thresholds);
+    });
+
+    test('upgrading a v9 file keeps sessions; the settings read back null', () async {
+      final dir = await Directory.systemTemp.createTemp('reefsight_v9_');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // Only the columns these assertions read: v10 only adds columns.
+      final v9 = await openDatabase(
+        p.join(dir.path, 'reefsight.db'),
+        version: 9,
+        singleInstance: false,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE transect_sessions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              tape_length_meters REAL NOT NULL,
+              belt_width_meters REAL NOT NULL
+            )
+          ''');
+        },
+      );
+      final id = await v9.insert('transect_sessions', {
+        'started_at': DateTime.utc(2026, 1, 1).toIso8601String(),
+        'tape_length_meters': 50.0,
+        'belt_width_meters': 1.0,
+      });
+      await v9.close();
+
+      final db = await TransectDatabase.open(dir.path);
+      addTearDown(db.close);
+
+      final session = (await db.sessionById(id))!;
+      expect(session.tapeLengthMeters, 50);
+      expect(session.cropStyle, isNull);
+      expect(session.thresholds, isNull);
     });
   });
 }

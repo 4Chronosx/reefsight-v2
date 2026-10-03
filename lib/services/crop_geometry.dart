@@ -88,6 +88,13 @@ enum CropStyle {
   boxSquarePad,
 }
 
+/// [style]'s display name, as Settings -> Diagnostics and the report show it.
+String cropStyleLabel(CropStyle style) => switch (style) {
+  CropStyle.insideMaskSquare => 'Inside mask',
+  CropStyle.boxStretch => 'Box stretch',
+  CropStyle.boxSquarePad => 'Box square',
+};
+
 /// A classifier crop window in frame pixels (integer-aligned) and the
 /// fraction of it that is colony mask. [coverage] is only meaningful for
 /// [CropStyle.insideMaskSquare]; the box styles report 1.0 and aren't gated
@@ -267,6 +274,55 @@ Rect _maskCellRect(Rect box, int rows, int cols, int row, int col) {
     cellW,
     cellH,
   );
+}
+
+/// Whether frame point ([x], [y]) lies on a foreground cell of [mask], under
+/// the same box-local grid assumption as [_maskCellRect] -- sub-plan 10
+/// step 0's fix must change both, so the photo overlay (sub-plan 18) and the
+/// coverage gate stay in agreement.
+bool maskCoversPoint(
+  List<List<double>> mask,
+  Rect box,
+  double x,
+  double y, {
+  double threshold = 0.5,
+}) {
+  final rows = mask.length;
+  final cols = rows == 0 ? 0 : mask.first.length;
+  if (rows == 0 || cols == 0 || box.width <= 0 || box.height <= 0) return false;
+  if (x < box.left || x >= box.right || y < box.top || y >= box.bottom) return false;
+  final r = ((y - box.top) / box.height * rows).floor().clamp(0, rows - 1);
+  final c = ((x - box.left) / box.width * cols).floor().clamp(0, cols - 1);
+  return c < mask[r].length && mask[r][c] >= threshold;
+}
+
+/// The pixel size of a [width] x [height] region scaled so its longer side
+/// is [longSide], aspect kept -- how context photos are sized, shared so a
+/// mask overlay is rendered at exactly its photo's size.
+({int width, int height}) scaledToLongSide(int width, int height, int longSide) {
+  final scale = longSide / math.max(width, height);
+  return (
+    width: math.max(1, (width * scale).round()),
+    height: math.max(1, (height * scale).round()),
+  );
+}
+
+/// What a colony photo needs to draw its mask over itself: the detection's
+/// [mask] and [box] (frame pixels) and the frame regions its context photo
+/// and classifier crop were cut from. [cropRegion] is `null` for a
+/// context-only (fallback) photo.
+class MaskOverlay {
+  const MaskOverlay({
+    required this.mask,
+    required this.box,
+    required this.contextRegion,
+    this.cropRegion,
+  });
+
+  final List<List<double>> mask;
+  final Rect box;
+  final CropRegion contextRegion;
+  final CropRegion? cropRegion;
 }
 
 /// A [side]-px square centred on [center], shifted (never shrunk) to lie

@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Rect;
 
@@ -32,6 +31,10 @@ typedef ColonyImages = ({Uint8List crop, Uint8List? context});
 /// Longest side of a context photo, in pixels (sub-plan 18 decision 1).
 const int contextPhotoLongSide = 320;
 
+/// The classifier's square input side, in pixels (its 224x224 training
+/// resolution) -- also the size its crop's mask overlay is rendered at.
+const int classifierInputSize = 224;
+
 /// Must stay a top-level (or static) function with no captured state --
 /// [compute] runs it on a separate isolate. Returns one entry per region,
 /// or an empty list if the frame can't be decoded. A context photo that
@@ -53,8 +56,8 @@ List<ColonyImages> cutColonyImages(ColonyCropJob job) {
           img.encodeJpg(
             img.copyResize(
               _copy(frame, job.regions[i]),
-              width: 224,
-              height: 224,
+              width: classifierInputSize,
+              height: classifierInputSize,
               // Crop spec v1 step 6 (sub-plan 10): bilinear, JPEG q95 -- the
               // same resampling ML sub-plan 2 harvests training crops with.
               interpolation: img.Interpolation.linear,
@@ -66,6 +69,29 @@ List<ColonyImages> cutColonyImages(ColonyCropJob job) {
       ),
   ];
 }
+
+/// Context photos alone, no classifier crop: the fallback photo for a
+/// tracked colony the classifier never returned a result for.
+typedef ContextPhotoJob = ({Uint8List frameBytes, List<PixelRegion> regions});
+
+/// Must stay top-level for [compute], like [cutColonyImages]. One entry per
+/// region (`null` where encoding failed), or an empty list if the frame
+/// can't be decoded.
+@visibleForTesting
+List<Uint8List?> cutContextPhotos(ContextPhotoJob job) {
+  img.Image? frame;
+  try {
+    frame = img.decodeImage(job.frameBytes);
+  } catch (_) {}
+  if (frame == null) return const [];
+  return [for (final region in job.regions) _contextJpeg(frame, region)];
+}
+
+/// [cutContextPhotos] on a background isolate.
+Future<List<Uint8List?>> cutContextPhotosInBackground(
+  Uint8List frameBytes,
+  List<PixelRegion> regions,
+) => compute(cutContextPhotos, (frameBytes: frameBytes, regions: regions));
 
 img.Image _copy(img.Image frame, PixelRegion region) => img.copyCrop(
   frame,
@@ -80,13 +106,14 @@ img.Image _copy(img.Image frame, PixelRegion region) => img.copyCrop(
 Uint8List? _contextJpeg(img.Image frame, PixelRegion? region) {
   if (region == null) return null;
   try {
-    final scale = contextPhotoLongSide / math.max(region.width, region.height);
+    // Shared with the mask overlay, so it renders at exactly this size.
+    final size = scaledToLongSide(region.width, region.height, contextPhotoLongSide);
     return Uint8List.fromList(
       img.encodeJpg(
         img.copyResize(
           _copy(frame, region),
-          width: math.max(1, (region.width * scale).round()),
-          height: math.max(1, (region.height * scale).round()),
+          width: size.width,
+          height: size.height,
           interpolation: img.Interpolation.linear,
         ),
         quality: 85,
@@ -109,11 +136,20 @@ class ColonyHealth {
 /// [crop] is the exact 224x224 classifier input, [context] the wider photo.
 /// Either image is `null` if it couldn't be cut or wasn't asked for.
 class ClassifiedCrop {
-  const ClassifiedCrop({required this.health, this.crop, this.context});
+  const ClassifiedCrop({required this.health, this.crop, this.context, this.overlay});
 
   final ColonyHealth health;
   final Uint8List? crop;
   final Uint8List? context;
+
+  /// The mask and regions to draw the colony's outline over [context] and
+  /// [crop], attached by `LiveFrameProcessor` (the classifier never sees
+  /// masks). `null` when the detection had no mask.
+  final MaskOverlay? overlay;
+
+  ClassifiedCrop withOverlay(MaskOverlay? overlay) => identical(overlay, this.overlay)
+      ? this
+      : ClassifiedCrop(health: health, crop: crop, context: context, overlay: overlay);
 }
 
 /// Wraps the NMFS-OSI bleaching classifier as its own [YOLO] instance

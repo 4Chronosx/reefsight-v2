@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import 'classification_policy.dart';
 import 'crop_geometry.dart';
 
 /// App-wide runtime settings that don't need persistence (sub-plan 6,
@@ -30,4 +31,11 @@ class AppSettings {
   /// spec'd default; the box styles exist for ML sub-plan 2's comparison
   /// and for debugging. Read once when Live opens, like [legacyLiveLoop].
   final cropStyle = ValueNotifier<CropStyle>(CropStyle.insideMaskSquare);
+
+  /// Classification thresholds (sub-plan 10's starting values by default),
+  /// overridable for comparing runs on the same footage. Read once when
+  /// Live opens, like [cropStyle], and logged at transect start.
+  final classificationThresholds = ValueNotifier<ClassificationThresholds>(
+    ClassificationThresholds.defaults,
+  );
 }

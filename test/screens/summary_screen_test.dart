@@ -6,7 +6,9 @@ import 'package:reefsight_mobile/screens/app_shell.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
 import 'package:reefsight_mobile/screens/video_player_screen.dart';
+import 'package:reefsight_mobile/services/classification_policy.dart';
 import 'package:reefsight_mobile/services/colony_photos.dart';
+import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
@@ -984,6 +986,10 @@ void main() {
       WidgetTester tester,
       List<String?> labels, {
       bool withPhotos = true,
+      double photoConfidence = 0.86,
+      bool withMasks = false,
+      CropStyle? cropStyle,
+      ClassificationThresholds? thresholds,
     }) async {
       tester.view.physicalSize = const Size(800, 1600);
       tester.view.devicePixelRatio = 1;
@@ -991,7 +997,12 @@ void main() {
       final db = await TransectDatabase.openInMemoryForTest();
       addTearDown(db.close);
       final sessionId = await db.insertSession(
-        TransectSession(startedAt: DateTime.utc(2026, 1, 1), tapeLengthMeters: 50),
+        TransectSession(
+          startedAt: DateTime.utc(2026, 1, 1),
+          tapeLengthMeters: 50,
+          cropStyle: cropStyle,
+          thresholds: thresholds,
+        ),
       );
       for (var i = 0; i < labels.length; i++) {
         final trackId = i + 1;
@@ -1006,7 +1017,7 @@ void main() {
             photoPath: withPhotos ? 'colony_photos/session1_track$trackId.jpg' : null,
             photoCropPath: withPhotos ? 'colony_photos/session1_track${trackId}_crop.jpg' : null,
             photoLabel: withPhotos ? (labels[i] ?? 'CORAL_BL') : null,
-            photoConfidence: withPhotos ? 0.86 : null,
+            photoConfidence: withPhotos ? photoConfidence : null,
           ),
         );
       }
@@ -1025,6 +1036,17 @@ void main() {
                 crop: {
                   for (final c in colonies)
                     if (c.photoCropPath != null) c.trackId: File('/docs/${c.photoCropPath}'),
+                },
+                contextMask: {
+                  if (withMasks)
+                    for (final c in colonies)
+                      if (c.photoPath != null) c.trackId: File('/docs/mask_${c.trackId}.png'),
+                },
+                cropMask: {
+                  if (withMasks)
+                    for (final c in colonies)
+                      if (c.photoCropPath != null)
+                        c.trackId: File('/docs/crop_mask_${c.trackId}.png'),
                 },
               ),
             ),
@@ -1094,6 +1116,124 @@ void main() {
       expect(find.text('Context'), findsOneWidget);
       expect(find.text('Classifier input'), findsOneWidget);
       expect(find.text('Bleached · confidence 0.86'), findsOneWidget);
+    });
+
+    Future<void> openThumbnail(WidgetTester tester) async {
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+      final thumbnail = find.byKey(const ValueKey('colony-thumbnail-1'));
+      await tester.scrollUntilVisible(
+        thumbnail,
+        300,
+        scrollable: find
+            .byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down)
+            .last,
+      );
+      await tester.tap(thumbnail);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the detail outlines the colony on both photos; the switch hides it',
+        (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0), withMasks: true);
+      await openThumbnail(tester);
+
+      final contextMask = find.byKey(const ValueKey('photo-mask-context'));
+      final cropMask = find.byKey(const ValueKey('photo-mask-crop'));
+      expect(contextMask, findsOneWidget);
+      expect(cropMask, findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('mask-toggle')));
+      await tester.pumpAndSettle();
+      expect(contextMask, findsNothing);
+      expect(cropMask, findsNothing);
+    });
+
+    testWidgets('a photo without a mask has no outline switch', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0));
+      await openThumbnail(tester);
+
+      expect(find.byKey(const ValueKey('mask-toggle')), findsNothing);
+    });
+
+    testWidgets('the enlarged bleached photo is outlined too', (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0), withMasks: true);
+      final photo = find.byKey(const ValueKey('bleached-photo-1'));
+      await tester.ensureVisible(photo);
+      await tester.tap(photo);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('photo-mask-context')), findsOneWidget);
+    });
+
+    // The note is judged against the floor the session ran with, not the
+    // default 0.7.
+    testWidgets('the uncertain-sample note uses the session\'s confidence floor',
+        (tester) async {
+      await pumpWithPhotos(
+        tester,
+        labels(bleached: 1, healthy: 0),
+        photoConfidence: 0.6,
+        thresholds: const ClassificationThresholds(confFloor: 0.55),
+      );
+      await openThumbnail(tester);
+      expect(find.textContaining('Uncertain sample'), findsNothing);
+    });
+
+    testWidgets('a raised floor marks a sample the default would accept',
+        (tester) async {
+      await pumpWithPhotos(
+        tester,
+        labels(bleached: 1, healthy: 0),
+        photoConfidence: 0.75,
+        thresholds: const ClassificationThresholds(confFloor: 0.8),
+      );
+      await openThumbnail(tester);
+      expect(find.textContaining('Uncertain sample'), findsOneWidget);
+    });
+
+    testWidgets('the technical tab names the session\'s settings, flagged when non-default',
+        (tester) async {
+      await pumpWithPhotos(
+        tester,
+        labels(bleached: 1, healthy: 0),
+        cropStyle: CropStyle.boxStretch,
+        thresholds: const ClassificationThresholds(minConfidentSamples: 1),
+      );
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'Classifier settings: Box stretch crop · segmentation 0.4 · '
+          'coverage 0.6 · confidence 0.7 · 1 sample',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Non-default settings'), findsOneWidget);
+    });
+
+    testWidgets('default settings are named but not flagged', (tester) async {
+      await pumpWithPhotos(
+        tester,
+        labels(bleached: 1, healthy: 0),
+        cropStyle: CropStyle.insideMaskSquare,
+        thresholds: ClassificationThresholds.defaults,
+      );
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Classifier settings: Inside mask crop'), findsOneWidget);
+      expect(find.textContaining('Non-default settings'), findsNothing);
+    });
+
+    testWidgets('a session recorded before settings were stored shows none',
+        (tester) async {
+      await pumpWithPhotos(tester, labels(bleached: 1, healthy: 0));
+      await tester.tap(find.text('Technical Detail'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Classifier settings'), findsNothing);
     });
 
     testWidgets('photos add a "Share report with photos" button; none, no button',

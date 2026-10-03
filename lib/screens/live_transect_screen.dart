@@ -11,6 +11,7 @@ import '../services/app_settings.dart';
 import '../services/bleaching_classifier.dart';
 import '../services/colony_photos.dart';
 import '../services/colony_size.dart';
+import '../services/crop_geometry.dart';
 import '../services/device_health_monitor.dart';
 import '../services/device_info.dart';
 import '../services/geo_fix.dart';
@@ -115,8 +116,17 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   );
   final _yoloController = YOLOViewController();
   final _tracker = BoTSortTracker();
-  final _healthAggregator = HealthAggregator();
-  final _healthHistoryRecorder = HealthHistoryRecorder();
+
+  /// Settings -> Diagnostics' thresholds, read once: fixed for this Live
+  /// session, like the crop style.
+  final _thresholds = AppSettings.instance.classificationThresholds.value;
+  late final _healthAggregator = HealthAggregator(
+    confidenceFloor: _thresholds.confFloor,
+    minConfidentSamples: _thresholds.minConfidentSamples,
+  );
+  late final _healthHistoryRecorder = HealthHistoryRecorder(
+    confidenceFloor: _thresholds.confFloor,
+  );
   late final TransectRecorder _recorder;
 
   /// Video time zero (sub-plan 16): stamped once `_recorder.start` returns,
@@ -139,7 +149,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
   // Sub-plan 18: each track's best photo so far, written by [_photoStore]
   // at every checkpoint and at finalize. The store exists once the session
   // does.
-  final BestColonyPhoto _bestPhotos = BestColonyPhoto();
+  late final BestColonyPhoto _bestPhotos = BestColonyPhoto(
+    confidenceFloor: _thresholds.confFloor,
+  );
   ColonyPhotoStore? _photoStore;
   String? _persistError;
 
@@ -232,6 +244,9 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       // Read once: the loop and crop are fixed for this Live session.
       useLegacyLoop: AppSettings.instance.legacyLiveLoop.value,
       cropStyle: AppSettings.instance.cropStyle.value,
+      thresholds: _thresholds,
+      cutContextPhotos: cutContextPhotosInBackground,
+      onContextPhoto: _handleContextPhoto,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sessionStartFuture = _startSession();
@@ -281,10 +296,17 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
           observerName: widget.observerName,
           entryFix: widget.entryFix,
           resultsHidden: widget.resultsHidden,
+          cropStyle: _frameProcessor.cropStyle,
+          thresholds: _thresholds,
         ),
       );
       _db = db;
       _sessionId = sessionId;
+      debugPrint(
+        'ReefSight: transect $sessionId settings: crop ${_frameProcessor.cropStyle.name}, '
+        '${_thresholds.format()}${_thresholds.isDefault ? ' (defaults)' : ''}'
+        '$_legacyNote',
+      );
       final photoStore = ColonyPhotoStore(
         documentsDirectory: documentsDir.path,
         sessionId: sessionId,
@@ -437,7 +459,10 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       photoPath: photo?.path,
       photoCropPath: photo?.cropPath,
       photoLabel: photo?.label,
-      photoConfidence: photo?.confidence,
+      // An unclassified fallback has no classifier confidence: stored null,
+      // not its in-memory 0, so the CSV doesn't show an impossible 0.00.
+      photoConfidence:
+          photo?.label == BestColonyPhoto.unclassifiedLabel ? null : photo?.confidence,
     );
   }
 
@@ -664,9 +689,17 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     final crop = _frameProcessor.cropStyle.name;
     final thermal = _deviceHealth.health.value?.thermalLevel?.name ?? '--';
     debugPrint(
-      'ReefSight: live loop ($loop, $crop): ${summary.format()} thermal=$thermal',
+      'ReefSight: live loop ($loop, $crop, ${_thresholds.format()}$_legacyNote): '
+      '${summary.format()} thermal=$thermal',
     );
   }
+
+  /// The legacy loop classifies every detection's box with no gating, so
+  /// the crop style, segmentation floor and coverage settings don't apply
+  /// to it -- said in the log, so a legacy run's line isn't misread.
+  String get _legacyNote => _frameProcessor.useLegacyLoop
+      ? ' [legacy loop: crop, seg and cov not applied]'
+      : '';
 
   /// Called by [LiveFrameProcessor] after every tracker update.
   ///
@@ -712,6 +745,13 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       _healthAggregator.record(trackId, health);
       _healthHistoryRecorder.record(trackId, health, sampledAt.toUtc());
     });
+  }
+
+  /// A track's fallback photo, cut from its detection box without
+  /// classification, so it has a photo even if it's never classified.
+  void _handleContextPhoto(int trackId, Uint8List photo, MaskOverlay? overlay) {
+    if (_finalized || !mounted) return;
+    _bestPhotos.offerUnclassified(trackId, photo, overlay: overlay);
   }
 
   /// Opens the confirm sheet (sub-plan step 6 + decision: "Tapping it opens

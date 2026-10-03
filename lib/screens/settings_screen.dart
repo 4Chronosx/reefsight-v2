@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../services/app_database.dart';
 import '../services/app_settings.dart';
+import '../services/classification_policy.dart';
 import '../services/crop_geometry.dart';
 import '../services/model_assets.dart';
 import '../widgets/section_card.dart';
@@ -94,22 +95,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           AppSettings.instance.cropStyle.value = value;
                         }
                       },
-                      items: const [
-                        DropdownMenuItem(
-                          value: CropStyle.insideMaskSquare,
-                          child: Text('Inside mask'),
-                        ),
-                        DropdownMenuItem(
-                          value: CropStyle.boxStretch,
-                          child: Text('Box stretch'),
-                        ),
-                        DropdownMenuItem(
-                          value: CropStyle.boxSquarePad,
-                          child: Text('Box square'),
-                        ),
+                      items: [
+                        for (final style in CropStyle.values)
+                          DropdownMenuItem(value: style, child: Text(cropStyleLabel(style))),
                       ],
                     ),
                   ),
+                ),
+                ValueListenableBuilder<ClassificationThresholds>(
+                  valueListenable: AppSettings.instance.classificationThresholds,
+                  builder: (context, thresholds, _) => _ThresholdSettings(thresholds),
                 ),
               ],
             ),
@@ -164,6 +159,109 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The four classification thresholds as dropdowns, each a fixed set of
+/// choices around sub-plan 10's starting value (marked "(default)"), plus a
+/// reset. Writes [AppSettings.classificationThresholds]; Live reads it once
+/// per transect, like the crop style.
+class _ThresholdSettings extends StatelessWidget {
+  const _ThresholdSettings(this.thresholds);
+
+  final ClassificationThresholds thresholds;
+
+  void _set(ClassificationThresholds value) =>
+      AppSettings.instance.classificationThresholds.value = value;
+
+  Widget _tile<T extends num>({
+    required String id,
+    required String title,
+    required String subtitle,
+    required T value,
+    required T defaultValue,
+    required List<T> choices,
+    required void Function(T) onChanged,
+  }) => ListTile(
+    contentPadding: EdgeInsets.zero,
+    title: Text(title),
+    subtitle: Text(subtitle),
+    trailing: DropdownButton<T>(
+      key: ValueKey('threshold-$id'),
+      value: value,
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
+      items: [
+        for (final choice in choices)
+          DropdownMenuItem(
+            value: choice,
+            child: Text(choice == defaultValue ? '$choice (default)' : '$choice'),
+          ),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    const d = ClassificationThresholds.defaults;
+    return Column(
+      children: [
+        const ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text('Classification thresholds'),
+          subtitle: Text(
+            'Comparison only. Applies from the next transect, and is saved '
+            'with it and shown on its report. Leave at the defaults for real '
+            'surveys.',
+          ),
+        ),
+        _tile<double>(
+          id: 'segFloor',
+          title: 'Segmentation floor',
+          subtitle: 'Detections scored below this are never classified.',
+          value: thresholds.segFloor,
+          defaultValue: d.segFloor,
+          choices: const [0.3, 0.4, 0.5, 0.6],
+          onChanged: (v) => _set(thresholds.copyWith(segFloor: v)),
+        ),
+        _tile<double>(
+          id: 'minCoverage',
+          title: 'Mask coverage',
+          subtitle: 'Inside-mask crops with less coral than this are skipped.',
+          value: thresholds.minCoverage,
+          defaultValue: d.minCoverage,
+          choices: const [0.4, 0.5, 0.6, 0.7],
+          onChanged: (v) => _set(thresholds.copyWith(minCoverage: v)),
+        ),
+        _tile<double>(
+          id: 'confFloor',
+          title: 'Confidence floor',
+          subtitle: 'Classifications below this are recorded as uncertain.',
+          value: thresholds.confFloor,
+          defaultValue: d.confFloor,
+          choices: const [0.55, 0.6, 0.65, 0.7, 0.8],
+          onChanged: (v) => _set(thresholds.copyWith(confFloor: v)),
+        ),
+        _tile<int>(
+          id: 'minConfidentSamples',
+          title: 'Confident samples',
+          subtitle: 'Needed before a colony gets a label.',
+          value: thresholds.minConfidentSamples,
+          defaultValue: d.minConfidentSamples,
+          choices: const [1, 2, 3],
+          onChanged: (v) => _set(thresholds.copyWith(minConfidentSamples: v)),
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            key: const ValueKey('threshold-reset'),
+            onPressed: thresholds.isDefault ? null : () => _set(d),
+            child: const Text('Reset to defaults'),
+          ),
+        ),
+      ],
     );
   }
 }

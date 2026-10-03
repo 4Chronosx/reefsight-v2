@@ -6,7 +6,9 @@ import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/classification_policy.dart';
 import '../services/colony_photos.dart';
+import '../services/crop_geometry.dart';
 import '../services/device_checks.dart';
 import '../services/executive_summary.dart';
 import '../services/geo_fix.dart';
@@ -1195,6 +1197,26 @@ class _TechnicalTabState extends State<_TechnicalTab> {
     return 'Device got hot (${peak.name}) during this transect.';
   }
 
+  /// The classifier settings the session ran with (Settings -> Diagnostics),
+  /// so a comparison run's report says what produced it. `null` for a
+  /// session recorded before they were stored (schema v10).
+  static String? _settingsLine(TransectSession session) {
+    final t = session.thresholds;
+    final crop = session.cropStyle;
+    if (t == null || crop == null) return null;
+    final n = t.minConfidentSamples;
+    return 'Classifier settings: ${cropStyleLabel(crop)} crop · '
+        'segmentation ${t.segFloor} · coverage ${t.minCoverage} · '
+        'confidence ${t.confFloor} · $n sample${n == 1 ? '' : 's'}';
+  }
+
+  static bool _isComparisonRun(TransectSession session) {
+    final t = session.thresholds;
+    final crop = session.cropStyle;
+    if (t == null || crop == null) return false;
+    return !t.isDefault || crop != CropStyle.insideMaskSquare;
+  }
+
   bool _isExporting = false;
   String? _exportError;
   String? _csvPath;
@@ -1290,6 +1312,22 @@ class _TechnicalTabState extends State<_TechnicalTab> {
             fontSize: 12,
           ),
         ),
+        if (_settingsLine(report.session) case final line?)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              line,
+              style: const TextStyle(color: AppColors.onSurface, fontSize: 12),
+            ),
+          ),
+        if (_isComparisonRun(report.session))
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Non-default settings: a comparison run, not a standard survey.',
+              style: TextStyle(color: Colors.amber.shade900, fontSize: 12),
+            ),
+          ),
         if (_thermalNote(report.session.thermalPeak) case final note?)
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -1332,6 +1370,8 @@ class _TechnicalTabState extends State<_TechnicalTab> {
             videoFile: widget.videoFile,
             photo: widget.photos.context[colony.trackId],
             crop: widget.photos.crop[colony.trackId],
+            photoMask: widget.photos.contextMask[colony.trackId],
+            cropMask: widget.photos.cropMask[colony.trackId],
           ),
         ),
         const SizedBox(height: 20),
@@ -1631,6 +1671,8 @@ class _ColonyDetailRow extends StatelessWidget {
     this.videoFile,
     this.photo,
     this.crop,
+    this.photoMask,
+    this.cropMask,
   });
 
   final TrackedColonyRecord colony;
@@ -1641,6 +1683,10 @@ class _ColonyDetailRow extends StatelessWidget {
   /// disk. With a photo the row shows it instead of the mask.
   final File? photo;
   final File? crop;
+
+  /// Their mask overlays, outlined in the photo detail.
+  final File? photoMask;
+  final File? cropMask;
 
   void _openVideo(BuildContext context, File video) {
     final offset = videoOffsetFor(colony, session);
@@ -1677,7 +1723,15 @@ class _ColonyDetailRow extends StatelessWidget {
       child: Row(
         children: [
           if (photo != null)
-            ColonyThumbnail(colony: colony, photo: photo, crop: crop)
+            ColonyThumbnail(
+              colony: colony,
+              photo: photo,
+              crop: crop,
+              confidenceFloor:
+                  (session.thresholds ?? ClassificationThresholds.defaults).confFloor,
+              photoMask: photoMask,
+              cropMask: cropMask,
+            )
           else if (maskPath != null)
             ClipRRect(
               borderRadius: BorderRadius.circular(4),

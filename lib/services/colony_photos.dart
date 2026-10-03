@@ -1,11 +1,15 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'dart:ui' show Rect;
+
+import 'package:flutter/foundation.dart' show compute, debugPrint, visibleForTesting;
+import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 
 import 'bleaching_classifier.dart';
 import 'classification_policy.dart';
+import 'crop_geometry.dart';
 import 'tracked_colony_record.dart';
 
 /// One colony's best sample so far for one label, with its images
@@ -18,7 +22,12 @@ class ColonyPhoto {
     required this.confident,
     required this.context,
     this.crop,
+    this.overlay,
   });
+
+  /// Where to draw the colony's mask over [context] and [crop]; `null`
+  /// when the sample had no mask. Rendered to PNGs at write time.
+  final MaskOverlay? overlay;
 
   final int trackId;
   final String label;
@@ -82,9 +91,33 @@ class BestColonyPhoto {
       confident: rank.$1,
       context: context,
       crop: result.crop,
+      overlay: result.overlay,
     );
     return true;
   }
+
+  /// Records a context-only photo for [trackId], cut from its detection
+  /// box with no classification -- the fallback so a tracked colony has a
+  /// photo even if the classifier never returned a result for it. Stored
+  /// under [unclassifiedLabel] with confidence 0, so any classified sample
+  /// beats it in [ColonyPhotoStore.photoFor]. Only the first is kept.
+  bool offerUnclassified(int trackId, Uint8List context, {MaskOverlay? overlay}) {
+    final key = (trackId, unclassifiedLabel);
+    if (_rank.containsKey(key)) return false;
+    _rank[key] = (false, 0.0);
+    _pending[key] = ColonyPhoto(
+      trackId: trackId,
+      label: unclassifiedLabel,
+      confidence: 0,
+      confident: false,
+      context: context,
+      overlay: overlay,
+    );
+    return true;
+  }
+
+  /// The label of an [offerUnclassified] photo.
+  static const String unclassifiedLabel = 'UNCLASSIFIED';
 
   /// The bests that changed since the last call. Each is handed over once.
   List<ColonyPhoto> takePending() {
@@ -190,11 +223,16 @@ class ColonyPhotoStore {
     final path = p.posix.join(folder, '$base.jpg');
     final crop = photo.crop;
     final cropPath = crop == null ? null : p.posix.join(folder, '${base}_crop.jpg');
+    final masks = await _renderMasks(photo);
 
     final staged = <(File, String)>[];
     try {
       staged.add(await _stage(path, photo.context));
       if (cropPath != null) staged.add(await _stage(cropPath, crop!));
+      if (masks.context case final bytes?) staged.add(await _stage(maskPathFor(path), bytes));
+      if (cropPath != null && masks.crop != null) {
+        staged.add(await _stage(maskPathFor(cropPath), masks.crop!));
+      }
       for (final (temp, target) in staged.reversed) {
         await temp.rename(target);
       }
@@ -207,6 +245,12 @@ class ColonyPhotoStore {
       rethrow;
     }
 
+    // A mask left from an earlier best would outline the wrong photo.
+    if (masks.context == null) await _deleteIfPresent(maskPathFor(path));
+    if (masks.crop == null || cropPath == null) {
+      await _deleteIfPresent(maskPathFor(p.posix.join(folder, '${base}_crop.jpg')));
+    }
+
     return StoredColonyPhoto(
       path: path,
       cropPath: cropPath,
@@ -214,6 +258,46 @@ class ColonyPhotoStore {
       confidence: photo.confidence,
       confident: photo.confident,
     );
+  }
+
+  /// [photo]'s mask overlays, rendered at its context photo's and crop's
+  /// pixel sizes on a background isolate. A failed render only costs the
+  /// outline, never the photo.
+  Future<({Uint8List? context, Uint8List? crop})> _renderMasks(ColonyPhoto photo) async {
+    final overlay = photo.overlay;
+    if (overlay == null) return (context: null, crop: null);
+    try {
+      final region = overlay.contextRegion;
+      final size = scaledToLongSide(region.width, region.height, contextPhotoLongSide);
+      final context = await compute(renderMaskOverlay, (
+        mask: overlay.mask,
+        box: overlay.box,
+        region: region,
+        width: size.width,
+        height: size.height,
+      ));
+      final cropRegion = overlay.cropRegion;
+      final crop = photo.crop == null || cropRegion == null
+          ? null
+          : await compute(renderMaskOverlay, (
+              mask: overlay.mask,
+              box: overlay.box,
+              region: cropRegion,
+              width: classifierInputSize,
+              height: classifierInputSize,
+            ));
+      return (context: context, crop: crop);
+    } catch (error) {
+      debugPrint('ReefSight: colony mask overlay failed for track ${photo.trackId}: $error');
+      return (context: null, crop: null);
+    }
+  }
+
+  Future<void> _deleteIfPresent(String relativePath) async {
+    try {
+      final file = File(_absolute(relativePath));
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
   }
 
   Future<(File, String)> _stage(String relativePath, Uint8List bytes) async {
@@ -241,15 +325,82 @@ Future<File?> resolveColonyPhoto(
   return await file.exists() ? file : null;
 }
 
+/// Where a photo's mask overlay is stored: beside it, `<name>_mask.png`.
+/// Derived, not stored, so it needs no database column.
+String maskPathFor(String photoPath) => photoPath.endsWith('.jpg')
+    ? '${photoPath.substring(0, photoPath.length - 4)}_mask.png'
+    : '${photoPath}_mask.png';
+
+/// The overlay's fill alpha; the outline is opaque.
+const int maskFillAlpha = 70;
+
+/// Amber: stands out against blue-green reef in both photos.
+const _maskColor = (r: 255, g: 213, b: 79);
+
+/// One mask overlay to render: frame-pixel [mask]/[box], and the frame
+/// [region] a [width] x [height] photo was cut from.
+typedef MaskRenderJob = ({
+  List<List<double>> mask,
+  Rect box,
+  CropRegion region,
+  int width,
+  int height,
+});
+
+/// The colony's mask as a transparent PNG the size of its photo: a
+/// translucent fill with an opaque ~2 px outline. Each photo pixel is mapped
+/// back to the frame and looked up with [maskCoversPoint], so the overlay
+/// follows the same mask mapping as the coverage gate. Must stay top-level
+/// for [compute].
+@visibleForTesting
+Uint8List renderMaskOverlay(MaskRenderJob job) {
+  final w = job.width, h = job.height, region = job.region;
+  final covered = List<bool>.filled(w * h, false);
+  for (var y = 0; y < h; y++) {
+    final fy = region.top + (y + 0.5) * region.height / h;
+    for (var x = 0; x < w; x++) {
+      final fx = region.left + (x + 0.5) * region.width / w;
+      covered[y * w + x] = maskCoversPoint(job.mask, job.box, fx, fy);
+    }
+  }
+  // The photo's edge isn't the colony's: off-image counts as covered, so a
+  // colony cut by the edge isn't outlined along it.
+  bool at(int x, int y) => x < 0 || y < 0 || x >= w || y >= h || covered[y * w + x];
+
+  const outlineWidth = 2;
+  final image = img.Image(width: w, height: h, numChannels: 4);
+  final (:r, :g, :b) = _maskColor;
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      if (!covered[y * w + x]) continue;
+      var edge = false;
+      for (var d = 1; d <= outlineWidth && !edge; d++) {
+        edge = !at(x - d, y) || !at(x + d, y) || !at(x, y - d) || !at(x, y + d);
+      }
+      image.setPixelRgba(x, y, r, g, b, edge ? 255 : maskFillAlpha);
+    }
+  }
+  return Uint8List.fromList(img.encodePng(image));
+}
+
 /// A session's colony photos resolved to files that exist, by track id --
 /// what Summary shows (sub-plan 18 steps 4-5).
 class ColonyPhotoFiles {
-  const ColonyPhotoFiles({this.context = const {}, this.crop = const {}});
+  const ColonyPhotoFiles({
+    this.context = const {},
+    this.crop = const {},
+    this.contextMask = const {},
+    this.cropMask = const {},
+  });
 
   static const ColonyPhotoFiles empty = ColonyPhotoFiles();
 
   final Map<int, File> context;
   final Map<int, File> crop;
+
+  /// The mask overlays drawn over [context] and [crop], where one exists.
+  final Map<int, File> contextMask;
+  final Map<int, File> cropMask;
 
   /// The context photos, for "Share report with photos". The classifier
   /// crops stay out: they're technical, and they'd double an already long
@@ -268,12 +419,20 @@ Future<ColonyPhotoFiles> resolveColonyPhotos(
     return file == null ? null : MapEntry(trackId, file);
   }
 
-  final [context, crop] = await Future.wait([
-    for (final pick in [(TrackedColonyRecord c) => c.photoPath, (TrackedColonyRecord c) => c.photoCropPath])
+  String? mask(String? path) => path == null ? null : maskPathFor(path);
+  final [context, crop, contextMask, cropMask] = await Future.wait([
+    for (final pick in [
+      (TrackedColonyRecord c) => c.photoPath,
+      (TrackedColonyRecord c) => c.photoCropPath,
+      (TrackedColonyRecord c) => mask(c.photoPath),
+      (TrackedColonyRecord c) => mask(c.photoCropPath),
+    ])
       Future.wait([for (final c in colonies) resolve(c.trackId, pick(c))]),
   ]);
   return ColonyPhotoFiles(
     context: Map.fromEntries(context.nonNulls),
     crop: Map.fromEntries(crop.nonNulls),
+    contextMask: Map.fromEntries(contextMask.nonNulls),
+    cropMask: Map.fromEntries(cropMask.nonNulls),
   );
 }

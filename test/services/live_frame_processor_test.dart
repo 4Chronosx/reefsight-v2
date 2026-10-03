@@ -5,6 +5,7 @@ import 'dart:ui' show Rect;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/services/bleaching_classifier.dart';
+import 'package:reefsight_mobile/services/classification_policy.dart';
 import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/live_frame_processor.dart';
 import 'package:reefsight_mobile/services/live_loop_metrics.dart';
@@ -354,6 +355,104 @@ void main() {
       expect(fake.calls, hasLength(1));
     });
 
+    test('a classified result carries the mask and regions its photos were cut from',
+        () async {
+      final results = <ClassifiedCrop>[];
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: _FakeClassifier().call,
+        onTracks: (_) {},
+        onHealth: (_, result, _) => results.add(result),
+      );
+      final mask = full(5, 10);
+
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 200, 100), mask)]),
+      );
+      await pumpEventQueue();
+
+      final overlay = results.single.overlay!;
+      expect(overlay.mask, mask);
+      expect(overlay.box, const Rect.fromLTWH(100, 100, 200, 100));
+      // The box grown x1.5 about its centre, as the context photo is cut.
+      expect(
+        (overlay.contextRegion.left, overlay.contextRegion.top,
+            overlay.contextRegion.width, overlay.contextRegion.height),
+        (50, 75, 300, 150),
+      );
+      // The inside-mask square, as the classifier crop is cut.
+      expect(
+        (overlay.cropRegion!.left, overlay.cropRegion!.top,
+            overlay.cropRegion!.width, overlay.cropRegion!.height),
+        (140, 100, 100, 100),
+      );
+    });
+
+    test('a fallback photo carries its frame\'s mask overlay', () async {
+      final overlays = <MaskOverlay?>[];
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: _FakeClassifier().call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        cutContextPhotos: (bytes, regions) async => [Uint8List.fromList([7])],
+        onContextPhoto: (_, _, overlay) => overlays.add(overlay),
+      );
+
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 200, 100), full(5, 10))]),
+      );
+      await pumpEventQueue();
+
+      expect(overlays.single!.box, const Rect.fromLTWH(100, 100, 200, 100));
+      expect(overlays.single!.cropRegion, isNull);
+    });
+
+    test('a lowered coverage floor offers a crop the default rejects', () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        thresholds: const ClassificationThresholds(minCoverage: 0.15),
+      );
+
+      // 20% coverage, as in the low-coverage test above.
+      final thin = List.generate(5, (r) => List.filled(5, r == 2 ? 1.0 : 0.0));
+      processor.handleEvent(
+        _event([detWithMask(const Rect.fromLTWH(100, 100, 100, 100), thin)]),
+      );
+      await pumpEventQueue();
+
+      expect(fake.calls, hasLength(1));
+    });
+
+    test('a raised segmentation floor blocks a detection the default allows',
+        () async {
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        cropStyle: CropStyle.boxStretch,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        reclassifyEvery: Duration.zero,
+        thresholds: const ClassificationThresholds(segFloor: 0.5),
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+      expect(fake.calls, hasLength(1));
+
+      // 0.45 clears the default 0.4 floor (see the 0.5 control below) but
+      // not the raised one.
+      processor.handleEvent(_event([_det(101, 100, score: 0.45)]));
+      await pumpEventQueue();
+
+      expect(fake.calls, hasLength(1));
+    });
+
     test('a detection without a mask is not offered under insideMaskSquare',
         () async {
       final fake = _FakeClassifier();
@@ -432,6 +531,86 @@ void main() {
       await pumpEventQueue();
 
       expect(fake.calls.single, [const Rect.fromLTWH(100, 50, 200, 200)]);
+    });
+  });
+
+  group('LiveFrameProcessor fallback photos', () {
+    test('a confirmed track gets one context photo, even when it is never '
+        'classified', () async {
+      final cuts = <List<PixelRegion>>[];
+      final photos = <int, Uint8List>{};
+      final fake = _FakeClassifier();
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: fake.call,
+        // No mask, so insideMaskSquare never offers a crop to classify.
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        cutContextPhotos: (bytes, regions) async {
+          cuts.add(regions);
+          return [for (final _ in regions) Uint8List.fromList([7])];
+        },
+        onContextPhoto: (id, photo, _) => photos[id] = photo,
+      );
+
+      for (var i = 0; i < 3; i++) {
+        processor.handleEvent(_event([_det(100, 100)]));
+        await pumpEventQueue();
+      }
+
+      expect(fake.calls, isEmpty);
+      expect(photos.values.single, [7]);
+      // The 40x40 box grown x1.5 about its centre.
+      expect(cuts.single, [(left: 90, top: 90, width: 60, height: 60)]);
+    });
+
+    test('a failed cut is retried on a later frame', () async {
+      var fail = true;
+      final photos = <int, Uint8List>{};
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: _FakeClassifier().call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        cutContextPhotos: (bytes, regions) async {
+          if (fail) return [null];
+          return [Uint8List.fromList([7])];
+        },
+        onContextPhoto: (id, photo, _) => photos[id] = photo,
+      );
+
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+      expect(photos, isEmpty);
+
+      fail = false;
+      processor.handleEvent(_event([_det(100, 100)]));
+      await pumpEventQueue();
+      expect(photos, hasLength(1));
+    });
+
+    test('a cut that keeps failing is given up after the attempt limit',
+        () async {
+      var cuts = 0;
+      final processor = LiveFrameProcessor(
+        tracker: BoTSortTracker(),
+        classify: _FakeClassifier().call,
+        onTracks: (_) {},
+        onHealth: (_, _, _) {},
+        // An undecodable frame: an empty list, every time.
+        cutContextPhotos: (bytes, regions) async {
+          cuts++;
+          return const [];
+        },
+        onContextPhoto: (_, _, _) {},
+      );
+
+      for (var i = 0; i < 10; i++) {
+        processor.handleEvent(_event([_det(100, 100)]));
+        await pumpEventQueue();
+      }
+
+      expect(cuts, LiveFrameProcessor.maxContextPhotoAttempts);
     });
   });
 

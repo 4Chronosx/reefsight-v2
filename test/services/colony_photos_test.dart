@@ -1,8 +1,11 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show Rect;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
+import 'package:reefsight_mobile/services/crop_geometry.dart';
 import 'package:reefsight_mobile/services/bleaching_classifier.dart';
 import 'package:reefsight_mobile/services/colony_photos.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
@@ -21,10 +24,12 @@ ClassifiedCrop _result(
   int tag = 1,
   bool withContext = true,
   bool withCrop = true,
+  MaskOverlay? overlay,
 }) => ClassifiedCrop(
   health: ColonyHealth(label: label, confidence: confidence),
   crop: withCrop ? Uint8List.fromList([tag, 0xC]) : null,
   context: withContext ? Uint8List.fromList([tag, 0xF]) : null,
+  overlay: overlay,
 );
 
 Map<(int, String), ColonyPhoto> _byKey(List<ColonyPhoto> photos) => {
@@ -109,6 +114,19 @@ void main() {
       best.requeue(failed);
       expect(best.takePending().single.context, [1, 0xF]);
     });
+
+    test('an unclassified photo is kept once, with no crop', () {
+      final best = BestColonyPhoto(confidenceFloor: 0.7);
+
+      expect(best.offerUnclassified(1, Uint8List.fromList([1, 0xF])), isTrue);
+      expect(best.offerUnclassified(1, Uint8List.fromList([2, 0xF])), isFalse);
+
+      final photo = best.takePending().single;
+      expect(photo.label, BestColonyPhoto.unclassifiedLabel);
+      expect(photo.context, [1, 0xF]);
+      expect(photo.crop, isNull);
+      expect(photo.confident, isFalse);
+    });
   });
 
   group('ColonyPhotoStore', () {
@@ -169,6 +187,24 @@ void main() {
       // A label with no photo falls back the same way.
       expect(store.photoFor(2, label: 'OTHER')!.label, _healthy);
       expect(store.photoFor(3), isNull);
+    });
+
+    test('an unclassified photo is shown only until a classified one exists', () async {
+      final best = BestColonyPhoto(confidenceFloor: 0.7)
+        ..offerUnclassified(1, Uint8List.fromList([1, 0xF]));
+      final store = ColonyPhotoStore(documentsDirectory: documents.path, sessionId: 1);
+      await store.flush(best);
+
+      final fallback = store.photoFor(1)!;
+      expect(fallback.label, BestColonyPhoto.unclassifiedLabel);
+      expect(fallback.path, 'colony_photos/session1_track1_UNCLASSIFIED.jpg');
+      expect(fallback.cropPath, isNull);
+      expect(await file(fallback.path).readAsBytes(), [1, 0xF]);
+
+      // Even an uncertain classification beats it.
+      best.offer(1, _result(0.55, tag: 2));
+      await store.flush(best);
+      expect(store.photoFor(1)!.label, _bleached);
     });
 
     test('writes a file only when that track\'s best changed', () async {
@@ -286,5 +322,94 @@ void main() {
       expect(files.crop.keys, [1]);
       expect(files.contextPaths, hasLength(2));
     });
+
+    test('a photo with a mask overlay writes mask images beside both photos', () async {
+      final best = BestColonyPhoto(confidenceFloor: 0.7)
+        ..offer(1, _result(0.8, overlay: _overlay));
+      final store = ColonyPhotoStore(documentsDirectory: documents.path, sessionId: 1);
+      await store.flush(best);
+
+      final contextMask = file('colony_photos/session1_track1_CORAL_BL_mask.png');
+      final cropMask = file('colony_photos/session1_track1_CORAL_BL_crop_mask.png');
+      // Rendered at the photos' own sizes: the 100x50 region at 320 long
+      // side, and the classifier's 224x224.
+      final contextImage = img.decodePng(await contextMask.readAsBytes())!;
+      expect((contextImage.width, contextImage.height), (320, 160));
+      final cropImage = img.decodePng(await cropMask.readAsBytes())!;
+      expect((cropImage.width, cropImage.height), (224, 224));
+
+      final files = await resolveColonyPhotos([
+        TrackedColonyRecord(
+          sessionId: 1,
+          trackId: 1,
+          healthHistory: const [],
+          firstSeenAt: DateTime.utc(2026, 1, 1),
+          lastSeenAt: DateTime.utc(2026, 1, 1),
+          photoPath: store.photoFor(1)!.path,
+          photoCropPath: store.photoFor(1)!.cropPath,
+        ),
+      ], documentsDirectory: documents.path);
+      expect(p.normalize(files.contextMask[1]!.path), p.normalize(contextMask.path));
+      expect(p.normalize(files.cropMask[1]!.path), p.normalize(cropMask.path));
+    });
+
+    test('a newer best without a mask removes the old mask images', () async {
+      final best = BestColonyPhoto(confidenceFloor: 0.7)
+        ..offer(1, _result(0.75, overlay: _overlay));
+      final store = ColonyPhotoStore(documentsDirectory: documents.path, sessionId: 1);
+      await store.flush(best);
+      final mask = file('colony_photos/session1_track1_CORAL_BL_mask.png');
+      expect(await mask.exists(), isTrue);
+
+      best.offer(1, _result(0.9));
+      await store.flush(best);
+
+      expect(await mask.exists(), isFalse);
+      expect(await file('colony_photos/session1_track1_CORAL_BL_crop_mask.png').exists(), isFalse);
+    });
+  });
+
+  group('renderMaskOverlay', () {
+    // A 2x2 mask over a 100x100 box, only the top-left cell; the photo is
+    // that box exactly, at 100x100.
+    img.Image render() => img.decodePng(
+      renderMaskOverlay((
+        mask: const [
+          [1.0, 0.0],
+          [0.0, 0.0],
+        ],
+        box: const Rect.fromLTWH(0, 0, 100, 100),
+        region: const CropRegion(left: 0, top: 0, width: 100, height: 100),
+        width: 100,
+        height: 100,
+      )),
+    )!;
+
+    test('colony pixels are a translucent fill, others transparent', () {
+      final image = render();
+
+      expect(image.getPixel(25, 25).a, maskFillAlpha);
+      expect(image.getPixel(75, 75).a, 0);
+      expect(image.getPixel(75, 25).a, 0);
+    });
+
+    test('the colony boundary is an opaque outline', () {
+      final image = render();
+
+      // x 49 is the last colony column before the background at x 50.
+      expect(image.getPixel(49, 25).a, 255);
+      expect(image.getPixel(25, 49).a, 255);
+    });
   });
 }
+
+/// A mask overlay for a 100x50 box whose photos are cut from the box itself.
+final _overlay = MaskOverlay(
+  mask: const [
+    [1.0, 1.0],
+    [1.0, 0.0],
+  ],
+  box: const Rect.fromLTWH(10, 10, 100, 50),
+  contextRegion: const CropRegion(left: 10, top: 10, width: 100, height: 50),
+  cropRegion: const CropRegion(left: 10, top: 10, width: 100, height: 50),
+);

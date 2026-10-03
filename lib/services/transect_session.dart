@@ -1,3 +1,5 @@
+import 'classification_policy.dart';
+import 'crop_geometry.dart';
 import 'device_checks.dart';
 import 'geo_fix.dart';
 import 'recount.dart';
@@ -35,6 +37,8 @@ class TransectSession {
     this.resultsHidden = false,
     this.resultsRevealedAt,
     this.recount,
+    this.cropStyle,
+    this.thresholds,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -114,6 +118,14 @@ class TransectSession {
   /// The manual recount, write-once (`TransectDatabase.recordRecount`).
   final Recount? recount;
 
+  /// The classifier crop style and thresholds this transect ran with
+  /// (Settings -> Diagnostics), stored at insert so the report can name
+  /// them and judge its photo notes against them. `null` on every session
+  /// recorded before schema v10 -- which ran with the defaults, unless the
+  /// crop style was changed for a comparison.
+  final CropStyle? cropStyle;
+  final ClassificationThresholds? thresholds;
+
   /// Whether the app's numbers must stay off screen right now.
   bool get resultsCurrentlyHidden => resultsHidden && resultsRevealedAt == null;
 
@@ -138,6 +150,8 @@ class TransectSession {
     bool? resultsHidden,
     DateTime? resultsRevealedAt,
     Recount? recount,
+    CropStyle? cropStyle,
+    ClassificationThresholds? thresholds,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -160,6 +174,8 @@ class TransectSession {
       resultsHidden: resultsHidden ?? this.resultsHidden,
       resultsRevealedAt: resultsRevealedAt ?? this.resultsRevealedAt,
       recount: recount ?? this.recount,
+      cropStyle: cropStyle ?? this.cropStyle,
+      thresholds: thresholds ?? this.thresholds,
     );
   }
 
@@ -186,6 +202,8 @@ class TransectSession {
         'results_hidden': resultsHidden ? 1 : 0,
         'results_revealed_at': resultsRevealedAt?.toIso8601String(),
         ...Recount.toColumns(recount),
+        'crop_style': cropStyle?.name,
+        ...thresholds?.toColumns() ?? ClassificationThresholds.nullColumns,
       };
 
   static DateTime? _parseNullable(Object? raw) =>
@@ -214,6 +232,8 @@ class TransectSession {
       resultsHidden: map['results_hidden'] == 1,
       resultsRevealedAt: _parseNullable(map['results_revealed_at']),
       recount: Recount.fromColumns(map),
+      cropStyle: CropStyle.values.asNameMap()[map['crop_style']],
+      thresholds: ClassificationThresholds.fromColumns(map),
     );
   }
 }
