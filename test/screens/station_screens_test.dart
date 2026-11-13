@@ -1,0 +1,563 @@
+import 'dart:async';
+import 'dart:math';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:reefsight_mobile/screens/capture_placeholder_screen.dart';
+import 'package:reefsight_mobile/screens/home_screen.dart';
+import 'package:reefsight_mobile/screens/station_detail_screen.dart';
+import 'package:reefsight_mobile/screens/station_edit_screen.dart';
+import 'package:reefsight_mobile/screens/station_transect_setup_screen.dart';
+import 'package:reefsight_mobile/screens/surveys_screen.dart';
+import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
+import 'package:reefsight_mobile/services/station.dart';
+import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/transect_database.dart';
+import 'package:reefsight_mobile/services/transect_placement.dart';
+import 'package:reefsight_mobile/services/transect_session.dart';
+
+import '../support/fake_device.dart';
+import '../support/fake_location.dart';
+
+// Issue #2: the station screens -- create/edit, detail, per-transect setup
+// with TB 2019-04's random placement, and routing by survey type. Real
+// in-memory SQLite (`ignoreClose`, since each screen closes the handle it
+// opens) on the fake clock; a tall surface so every card is built.
+
+void _useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(900, 3200);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+Future<TransectDatabase> _db() async {
+  final db = await TransectDatabase.openInMemoryForTest(ignoreClose: true);
+  addTearDown(db.closeForTest);
+  return db;
+}
+
+Station _station({
+  SurveyType type = SurveyType.photoTransect,
+  double? depthMaxM,
+  String? siteName = 'Alegria MPA',
+  String? observerName = 'Diver A',
+}) =>
+    Station(
+      code: 'ALG-S1',
+      surveyType: type,
+      frameMode: type == SurveyType.photoTransect ? FrameMode.physical : null,
+      surveyedOn: DateTime(2026, 11, 15),
+      siteName: siteName,
+      observerName: observerName,
+      depthMaxM: depthMaxM,
+      createdAt: DateTime.utc(2026, 11, 14),
+    );
+
+TransectSession _transect(int stationId, int number, {double tape = 50, double? depthEndM}) =>
+    TransectSession(
+      startedAt: DateTime.utc(2026, 11, 15, number),
+      tapeLengthMeters: tape,
+      stationId: stationId,
+      transectNumber: number,
+      depthEndM: depthEndM,
+    );
+
+Finder _field(String key) => find.byKey(ValueKey(key));
+
+/// A host screen with a button that pushes [screen], recording what it
+/// pops with -- the edit screen pops the saved station's id.
+class _Host extends StatelessWidget {
+  const _Host({required this.screen, required this.onResult});
+
+  final Widget screen;
+  final ValueChanged<Object?> onResult;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Center(
+          child: ElevatedButton(
+            onPressed: () async =>
+                onResult(await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen))),
+            child: const Text('open'),
+          ),
+        ),
+      );
+}
+
+Widget _setup(
+  Station station,
+  TransectDatabase db, {
+  StartTransect? onStart,
+  OpenCapture? onCapture,
+  Random? random,
+}) {
+  final fake = FakeDevice();
+  return StationTransectSetupScreen(
+    station: station,
+    openDatabase: () async => db,
+    storageInfo: fake,
+    batteryInfo: fake,
+    thermalInfo: fake,
+    locationProvider: FakeLocationProvider.fix(),
+    startTransect: onStart ?? (_, _) {},
+    openCapture: onCapture ?? (_, _) {},
+    random: random,
+  );
+}
+
+void main() {
+  group('StationEditScreen', () {
+    testWidgets('a new station needs a code; frame mode shows for photo transects only',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      Object? result;
+      await tester.pumpWidget(MaterialApp(
+        home: _Host(
+          screen: StationEditScreen(
+            openDatabase: () async => db,
+            locationProvider: FakeLocationProvider.fix(),
+          ),
+          onResult: (r) => result = r,
+        ),
+      ));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      final save = find.widgetWithText(ElevatedButton, 'Save station');
+      expect(tester.widget<ElevatedButton>(save).onPressed, isNull);
+      expect(find.text('Physical frame'), findsOneWidget);
+
+      await tester.tap(find.text('Colony count (research)'));
+      await tester.pump();
+      expect(find.text('Physical frame'), findsNothing);
+
+      await tester.tap(find.text('Photo transect'));
+      await tester.pump();
+      await tester.tap(find.text('Imported photos'));
+      await tester.enterText(_field('station-code'), ' ALG-S2 ');
+      await tester.enterText(_field('station-site'), 'Alegria MPA');
+      await tester.enterText(_field('depth-min'), '4');
+      await tester.enterText(_field('depth-max'), '5.5');
+      await tester.tap(find.text('Upper slope'));
+      await tester.pump();
+      expect(tester.widget<ElevatedButton>(save).onPressed, isNotNull);
+
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+
+      final stations = await db.listStations();
+      expect(stations, hasLength(1));
+      final saved = stations.single.station;
+      expect(result, saved.id);
+      expect(saved.code, 'ALG-S2');
+      expect(saved.surveyType, SurveyType.photoTransect);
+      expect(saved.frameMode, FrameMode.importedMixed);
+      expect(saved.reefZone, ReefZone.upperSlope);
+      expect(saved.depthMinM, 4);
+      expect(saved.depthMaxM, 5.5);
+      expect(saved.siteName, 'Alegria MPA');
+    });
+
+    testWidgets('a max depth over 6 m is flagged, and below the min is an error',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      await tester.pumpWidget(MaterialApp(
+        home: StationEditScreen(
+          openDatabase: () async => db,
+          locationProvider: FakeLocationProvider.fix(),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.enterText(_field('station-code'), 'ALG-S1');
+      await tester.enterText(_field('depth-max'), '7');
+      await tester.pump();
+      expect(find.text(kFlagStationTooDeep), findsOneWidget);
+      final save = find.widgetWithText(ElevatedButton, 'Save station');
+      expect(tester.widget<ElevatedButton>(save).onPressed, isNotNull);
+
+      await tester.enterText(_field('depth-min'), '8');
+      await tester.pump();
+      expect(find.text('Deeper than the max'), findsOneWidget);
+      expect(tester.widget<ElevatedButton>(save).onPressed, isNull);
+    });
+
+    testWidgets('editing a station with transects locks survey type and frame mode',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      final existing = (await db.stationById(id))!;
+      await tester.pumpWidget(MaterialApp(
+        home: StationEditScreen(
+          openDatabase: () async => db,
+          locationProvider: FakeLocationProvider.fix(),
+          existing: existing,
+          transectCount: 1,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Locked'), findsOneWidget);
+      await tester.tap(find.text('Colony count (research)'));
+      await tester.enterText(_field('station-code'), 'ALG-S1b');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Save station'));
+      await tester.pumpAndSettle();
+
+      final saved = (await db.stationById(id))!;
+      expect(saved.code, 'ALG-S1b');
+      expect(saved.surveyType, SurveyType.photoTransect);
+      expect(saved.createdAt, existing.createdAt);
+    });
+  });
+
+  group('StationTransectSetupScreen', () {
+    testWidgets('preselects the next free number and disables the used ones', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      await db.insertSession(_transect(id, 1));
+      await db.insertSession(_transect(id, 3));
+      final station = (await db.stationById(id))!;
+
+      await tester.pumpWidget(MaterialApp(home: _setup(station, db)));
+      await tester.pumpAndSettle();
+
+      ChoiceChip chip(int n) => tester.widget<ChoiceChip>(_field('transect-number-$n'));
+      expect(chip(4).selected, isTrue);
+      expect(chip(1).onSelected, isNull);
+      expect(chip(3).onSelected, isNull);
+      expect(chip(2).onSelected, isNotNull);
+    });
+
+    testWidgets('Generate fills the random placement; flags show for depth and tape',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      final station = (await db.stationById(id))!;
+      final expected = generateRandomPlacement(Random(3));
+
+      await tester.pumpWidget(MaterialApp(home: _setup(station, db, random: Random(3))));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_field('generate-placement'));
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(_field('random-along')).controller!.text,
+        expected.alongM.toString(),
+      );
+      expect(
+        tester.widget<TextField>(_field('random-swimout')).controller!.text,
+        expected.swimoutM.toString(),
+      );
+
+      await tester.enterText(_field('tape-length'), '75');
+      await tester.enterText(_field('depth-end'), '6.5');
+      await tester.pump();
+      expect(find.text('Not the standard 50 m tape (TB 2019-04)'), findsOneWidget);
+      expect(find.text(kFlagTransectTooDeep), findsOneWidget);
+
+      await tester.enterText(_field('random-along'), '80');
+      await tester.pump();
+      expect(find.text('Enter 0-75 m'), findsOneWidget);
+    });
+
+    testWidgets('colony count hands Live the station and placement', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station(type: SurveyType.colonyCount));
+      final station = (await db.stationById(id))!;
+      TransectStart? started;
+
+      await tester.pumpWidget(MaterialApp(
+        home: _setup(station, db, onStart: (_, start) => started = start),
+      ));
+      await tester.pumpAndSettle();
+      await tester.enterText(_field('depth-start'), '4.5');
+      await tester.enterText(_field('depth-end'), '5');
+      await tester.enterText(_field('random-along'), '12.3');
+      await tester.enterText(_field('random-swimout'), '8.1');
+      await tester.pump();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Start Transect'));
+      await tester.pumpAndSettle();
+
+      expect(started, isNotNull);
+      expect(started!.tapeLengthMeters, 50);
+      expect(started!.siteName, 'Alegria MPA');
+      expect(started!.observerName, 'Diver A');
+      final placement = started!.placement!;
+      expect(placement.stationId, id);
+      expect(placement.transectNumber, 1);
+      expect(placement.captureSource, CaptureSource.legacyColony);
+      expect(placement.depthStartM, 4.5);
+      expect(placement.depthEndM, 5);
+      expect(placement.randomAlongM, 12.3);
+      expect(placement.randomSwimoutM, 8.1);
+      // Live inserts the colony-count session, not Setup.
+      expect(await db.transectsForStation(id), isEmpty);
+    });
+
+    // Review fix: Live inserts colony-count rows and keeps recording if that
+    // insert fails, so a number taken since the screen opened must be caught
+    // before Live is pushed.
+    testWidgets('a number taken since opening is refused before Live', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station(type: SurveyType.colonyCount));
+      final station = (await db.stationById(id))!;
+      var starts = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: _setup(station, db, onStart: (_, _) => starts++),
+      ));
+      await tester.pumpAndSettle();
+      await db.insertSession(_transect(id, 1)); // e.g. a Live left with back
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Start Transect'));
+      await tester.pumpAndSettle();
+
+      expect(starts, 0);
+      expect(find.text('T1 is already taken. Pick another number.'), findsOneWidget);
+      final t1 = tester.widget<ChoiceChip>(_field('transect-number-1'));
+      expect(t1.onSelected, isNull);
+      expect(tester.widget<ChoiceChip>(_field('transect-number-2')).selected, isTrue);
+    });
+
+    testWidgets('colony count: one Live per tap, numbers refreshed when Live returns',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station(type: SurveyType.colonyCount));
+      final station = (await db.stationById(id))!;
+      final live = Completer<void>();
+      var starts = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: _setup(station, db, onStart: (_, _) {
+          starts++;
+          return live.future;
+        }),
+      ));
+      await tester.pumpAndSettle();
+      final start = find.widgetWithText(ElevatedButton, 'Start Transect');
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      expect(tester.widget<ElevatedButton>(start).onPressed, isNull);
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      expect(starts, 1);
+
+      await db.insertSession(_transect(id, 1)); // what Live inserted
+      live.complete();
+      await tester.pumpAndSettle();
+      expect(tester.widget<ChoiceChip>(_field('transect-number-1')).onSelected, isNull);
+      expect(tester.widget<ChoiceChip>(_field('transect-number-2')).selected, isTrue);
+      expect(tester.widget<ElevatedButton>(start).onPressed, isNotNull);
+    });
+
+    for (final (type, label, source) in [
+      (SurveyType.photoTransect, 'Start photo capture', CaptureSource.inAppPhotos),
+      (SurveyType.preliminaryVideo, 'Start video capture', CaptureSource.inAppVideo),
+    ]) {
+      testWidgets('${type.name} saves the transect and opens its capture flow', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station(type: type));
+        final station = (await db.stationById(id))!;
+        CaptureStart? opened;
+
+        await tester.pumpWidget(MaterialApp(
+          home: _setup(station, db, onCapture: (_, start) => opened = start),
+        ));
+        await tester.pumpAndSettle();
+        await tester.enterText(_field('depth-start'), '5');
+        await tester.pump();
+        await tester.tap(find.widgetWithText(ElevatedButton, label));
+        await tester.pumpAndSettle();
+
+        final transects = await db.transectsForStation(id);
+        expect(transects, hasLength(1));
+        final t = transects.single;
+        expect(opened!.sessionId, t.id);
+        expect(opened!.transectNumber, 1);
+        expect(t.transectNumber, 1);
+        expect(t.captureSource, source);
+        expect(t.depthStartM, 5);
+        expect(t.siteName, 'Alegria MPA');
+        expect(t.pointsPerFrame, 10);
+        expect(t.endedAt, isNull);
+      });
+    }
+  });
+
+  group('StationDetailScreen', () {
+    testWidgets('lists transects with status and flags, and the station flags', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station(depthMaxM: 7));
+      await db.insertSession(_transect(id, 2, tape: 75));
+      await db.insertSession(_transect(id, 1, depthEndM: 6.5));
+
+      await tester.pumpWidget(MaterialApp(
+        home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('ALG-S1'), findsWidgets);
+      expect(find.text(kFlagStationTooDeep), findsOneWidget);
+      expect(find.text(kFlagFewTransects), findsOneWidget);
+      expect(find.text('T1'), findsOneWidget);
+      expect(find.text('T2'), findsOneWidget);
+      expect(find.text('Awaiting capture'), findsNWidgets(2));
+      expect(find.text(kFlagTransectTooDeep), findsOneWidget);
+      expect(find.text('Tape is 75 m, not 50 m'), findsOneWidget);
+      final add = find.widgetWithText(ElevatedButton, 'Add transect');
+      expect(tester.widget<ElevatedButton>(add).onPressed, isNotNull);
+    });
+
+    testWidgets('long-press deletes a transect, its files, and reloads', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      await db.insertSession(_transect(id, 1));
+      final t2 = await db.insertSession(_transect(id, 2));
+      final filesDeleted = <int?>[];
+      await tester.pumpWidget(MaterialApp(
+        home: StationDetailScreen(
+          stationId: id,
+          openDatabase: () async => db,
+          deleteFiles: (s) async => filesDeleted.add(s.id),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.text('T2'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(filesDeleted, [t2]);
+      expect(find.text('T2'), findsNothing);
+      expect(find.text('T1'), findsOneWidget);
+      expect((await db.transectsForStation(id)).map((t) => t.transectNumber), [1]);
+    });
+
+    testWidgets('Add transect is disabled once T1-T5 exist', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      for (var n = 1; n <= 5; n++) {
+        await db.insertSession(_transect(id, n));
+      }
+      await tester.pumpWidget(MaterialApp(
+        home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+      ));
+      await tester.pumpAndSettle();
+
+      final add = find.widgetWithText(ElevatedButton, 'Add transect');
+      expect(tester.widget<ElevatedButton>(add).onPressed, isNull);
+      expect(find.text(kFlagFewTransects), findsNothing);
+    });
+  });
+
+  testWidgets('Home recent surveys skip photo and preliminary station transects', (tester) async {
+    final db = await _db();
+    final photo = await db.insertStation(_station());
+    final colony = await db.insertStation(_station(type: SurveyType.colonyCount));
+    await db.insertSession(_transect(photo, 1).copyWith(
+      siteName: 'Photo T1',
+      captureSource: CaptureSource.inAppPhotos,
+    ));
+    await db.insertSession(_transect(colony, 1).copyWith(
+      siteName: 'Colony T1',
+      captureSource: CaptureSource.legacyColony,
+    ));
+    await db.insertSession(
+      TransectSession(startedAt: DateTime.utc(2026, 10, 4), tapeLengthMeters: 50, siteName: 'Loose'),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: HomeScreen(dataRevision: 0, onSeeAllSurveys: () {}, openDatabase: () async => db),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Photo T1'), findsNothing);
+    expect(find.text('Colony T1'), findsOneWidget);
+    expect(find.text('Loose'), findsOneWidget);
+  });
+
+  testWidgets('Surveys lists stations, and only station-less surveys as Unassigned',
+      (tester) async {
+    _useTallSurface(tester);
+    final db = await _db();
+    final id = await db.insertStation(_station());
+    await db.insertSession(_transect(id, 1).copyWith(siteName: 'In Station'));
+    await db.insertSession(
+      TransectSession(startedAt: DateTime.utc(2026, 10, 4), tapeLengthMeters: 50, siteName: 'Loose'),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: SurveysScreen(dataRevision: 0, openDatabase: () async => db),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stations'), findsOneWidget);
+    expect(find.text('ALG-S1'), findsOneWidget);
+    expect(find.text('1 of 5 transects'), findsOneWidget);
+    expect(find.text('Unassigned'), findsOneWidget);
+    expect(find.text('Loose'), findsOneWidget);
+    expect(find.text('In Station'), findsNothing);
+
+    await tester.tap(find.text('ALG-S1'));
+    await tester.pumpAndSettle();
+    expect(find.byType(StationDetailScreen), findsOneWidget);
+  });
+
+  // Issue #2's "Done when": a station with 3 transects, each opening its
+  // capture flow. Photo transect, so each Start goes to the placeholder (the
+  // real capture is #4) and back to the station.
+  testWidgets('end to end: three photo transects, each opening capture', (tester) async {
+    _useTallSurface(tester);
+    final db = await _db();
+    final id = await db.insertStation(_station());
+    final fake = FakeDevice();
+
+    await tester.pumpWidget(MaterialApp(
+      home: StationDetailScreen(
+        stationId: id,
+        openDatabase: () async => db,
+        buildTransectSetup: (station) => StationTransectSetupScreen(
+          station: station,
+          openDatabase: () async => db,
+          storageInfo: fake,
+          batteryInfo: fake,
+          thermalInfo: fake,
+          locationProvider: FakeLocationProvider.fix(),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    for (var n = 1; n <= 3; n++) {
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Add transect'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Start photo capture'));
+      await tester.pumpAndSettle();
+      expect(find.byType(CapturePlaceholderScreen), findsOneWidget);
+      expect(find.textContaining('T$n'), findsWidgets);
+      await tester.tap(find.text('Back to station'));
+      await tester.pumpAndSettle();
+      expect(find.byType(StationDetailScreen), findsOneWidget);
+    }
+
+    expect(find.text('T1'), findsOneWidget);
+    expect(find.text('T2'), findsOneWidget);
+    expect(find.text('T3'), findsOneWidget);
+    expect(find.text(kFlagFewTransects), findsNothing);
+    final transects = await db.transectsForStation(id);
+    expect(transects.map((t) => t.transectNumber), [1, 2, 3]);
+    expect(transects.every((t) => t.captureSource == CaptureSource.inAppPhotos), isTrue);
+  });
+}

@@ -62,7 +62,11 @@ any non-trivial architecture decision.
 - **#1 Schema v11 and data layer** (`sub-plans/20-schema-v11-stations.md`): **done 2026-11-14.**
   Adds stations, transect frames, frame points, the category map and transect cover, plus the
   station and transect columns on `transect_sessions`.
-- **Next: #2**, the station and transect setup screens.
+- **#2 Station and transect setup screens** (`sub-plans/21-station-screens.md`): **done 2026-11-14.**
+  Stations list (with an Unassigned group), create/edit, station detail, per-transect setup with
+  TB 2019-04 random placement and flags, and routing by survey type (colony count to Live; photo and
+  preliminary to a placeholder until #4 and #13).
+- **Next: #3**, colony-count mode as a station survey type.
 
 ## Explicitly out of scope for now
 

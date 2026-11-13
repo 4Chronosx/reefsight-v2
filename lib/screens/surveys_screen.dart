@@ -7,8 +7,12 @@ import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/session_files.dart';
 import '../services/session_summary.dart';
+import '../services/station.dart';
+import '../services/station_checks.dart';
 import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
+import 'station_detail_screen.dart';
+import 'station_edit_screen.dart';
 import 'summary_screen.dart';
 import 'transect_setup_screen.dart';
 
@@ -54,9 +58,31 @@ class SurveysScreen extends StatefulWidget {
   State<SurveysScreen> createState() => _SurveysScreenState();
 }
 
-class _SurveysScreenState extends State<SurveysScreen> {
-  late Future<List<SessionSummary>> _sessions = _load();
+/// Issue #2: what the tab lists -- stations first, then the **Unassigned**
+/// group (every survey outside a station: all pre-v11 ones, and quick
+/// transects since).
+class _SurveysData {
+  const _SurveysData(this.stations, this.unassigned);
 
+  final List<StationSummary> stations;
+  final List<SessionSummary> unassigned;
+
+  bool get isEmpty => stations.isEmpty && unassigned.isEmpty;
+}
+
+class _SurveysScreenState extends State<SurveysScreen> {
+  late Future<_SurveysData> _data = _loadData();
+
+  Future<_SurveysData> _loadData() async {
+    final db = await widget.openDatabase();
+    try {
+      return _SurveysData(await db.listStations(), await db.listUnassignedSessions());
+    } finally {
+      await db.close();
+    }
+  }
+
+  /// Every survey, station or not -- the recount export's input.
   Future<List<SessionSummary>> _load() async {
     final db = await widget.openDatabase();
     try {
@@ -71,10 +97,32 @@ class _SurveysScreenState extends State<SurveysScreen> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.dataRevision != widget.dataRevision) {
       setState(() {
-        _sessions = _load();
+        _data = _loadData();
       });
     }
   }
+
+  /// Pushed routes return here; reload in case a station changed.
+  Future<void> _pushThenReload(Future<void> Function() push) async {
+    await push();
+    if (!mounted) return;
+    setState(() {
+      _data = _loadData();
+    });
+  }
+
+  void _newStation() =>
+      _pushThenReload(() => createStation(context, openDatabase: widget.openDatabase));
+
+  void _quickTransect() => _pushThenReload(
+        () => Navigator.of(context).push<void>(
+          MaterialPageRoute(builder: (_) => const TransectSetupScreen()),
+        ),
+      );
+
+  void _openStation(int id) => _pushThenReload(
+        () => Navigator.of(context).push<void>(StationDetailScreen.route(id, widget.openDatabase)),
+      );
 
   bool _exporting = false;
 
@@ -170,7 +218,7 @@ class _SurveysScreenState extends State<SurveysScreen> {
         notify();
       } else if (mounted) {
         setState(() {
-          _sessions = _load();
+          _data = _loadData();
         });
       }
     }
@@ -183,33 +231,48 @@ class _SurveysScreenState extends State<SurveysScreen> {
         title: const Text('Surveys'),
         actions: [
           IconButton(
+            tooltip: 'New station',
+            icon: const Icon(Icons.add_location_alt_outlined),
+            onPressed: _newStation,
+          ),
+          IconButton(
             tooltip: 'Export recount comparisons',
             icon: const Icon(Icons.fact_check_outlined),
             onPressed: _exporting ? null : _exportRecountComparisons,
           ),
         ],
       ),
-      body: FutureBuilder<List<SessionSummary>>(
-        future: _sessions,
+      body: FutureBuilder<_SurveysData>(
+        future: _data,
         builder: (context, snapshot) {
           if (snapshot.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
           }
-          final sessions = snapshot.data ?? const [];
-          if (sessions.isEmpty) {
-            return _EmptyState(
-              onStart: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const TransectSetupScreen()),
-              ),
-            );
+          final data = snapshot.data ?? const _SurveysData([], []);
+          if (data.isEmpty) {
+            return _EmptyState(onNewStation: _newStation, onQuickTransect: _quickTransect);
           }
-          return ListView.builder(
+          final sessions = data.unassigned;
+          return ListView(
             padding: const EdgeInsets.all(16),
-            itemCount: sessions.length,
-            itemBuilder: (context, i) => _SurveyCard(
-              summary: sessions[i],
-              onLongPress: () => _deleteSurvey(sessions[i].session),
-            ),
+            children: [
+              _SectionHeader(
+                'Stations',
+                action: TextButton.icon(
+                  onPressed: _newStation,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('New station'),
+                ),
+              ),
+              for (final s in data.stations)
+                _StationCard(summary: s, onTap: () => _openStation(s.station.id!)),
+              if (sessions.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                const _SectionHeader('Unassigned'),
+                for (final s in sessions)
+                  _SurveyCard(summary: s, onLongPress: () => _deleteSurvey(s.session)),
+              ],
+            ],
           );
         },
       ),
@@ -217,10 +280,93 @@ class _SurveysScreenState extends State<SurveysScreen> {
   }
 }
 
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onStart});
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.title, {this.action});
 
-  final VoidCallback onStart;
+  final String title;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            ),
+            ?action,
+          ],
+        ),
+      );
+}
+
+class _StationCard extends StatelessWidget {
+  const _StationCard({required this.summary, required this.onTap});
+
+  final StationSummary summary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final station = summary.station;
+    final d = station.surveyedOn;
+    final date = '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final flags = stationFlags(station, summary.transectCount);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      station.code,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                  ),
+                  Text(
+                    '${summary.transectCount} of $kMaxTransects transects',
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                [surveyTypeLabel(station.surveyType), date, ?station.siteName].join(' · '),
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              ),
+              if (flags.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, size: 14, color: Colors.amber),
+                    const SizedBox(width: 4),
+                    Text(
+                      flags.length == 1 ? flags.single : '${flags.length} checks to review',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.onNewStation, required this.onQuickTransect});
+
+  final VoidCallback onNewStation;
+  final VoidCallback onQuickTransect;
 
   @override
   Widget build(BuildContext context) {
@@ -238,7 +384,12 @@ class _EmptyState extends StatelessWidget {
               style: TextStyle(color: Colors.grey.shade600),
             ),
             const SizedBox(height: 20),
-            GloveButton(label: 'Start your first survey', onPressed: onStart),
+            GloveButton(label: 'New station', onPressed: onNewStation),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: onQuickTransect,
+              child: const Text('Quick transect (no station)'),
+            ),
           ],
         ),
       ),

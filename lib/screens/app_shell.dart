@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../constants/app_colors.dart';
 import 'home_screen.dart';
 import 'settings_screen.dart';
+import 'station_edit_screen.dart';
 import 'surveys_screen.dart';
 import 'transect_setup_screen.dart';
 
@@ -76,6 +77,43 @@ class _AppShellState extends State<AppShell> with RouteAware {
   @override
   void didPopNext() => _refreshData();
 
+  /// Issue #2: surveys now start from a station. The quick transect (the
+  /// pre-station flow, saved under Unassigned) stays one tap away, so the
+  /// field team can keep using it while stations are new.
+  Future<void> _chooseStart() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.add_location_alt_outlined),
+              title: const Text('New station'),
+              subtitle: const Text('3-5 transects, TB 2019-04'),
+              onTap: () => Navigator.of(context).pop('station'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.straighten_rounded),
+              title: const Text('Quick transect (no station)'),
+              subtitle: const Text('Colony count, saved under Unassigned'),
+              onTap: () => Navigator.of(context).pop('quick'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case 'station':
+        await createStation(context);
+      case 'quick':
+        await Navigator.of(context).push<void>(
+          MaterialPageRoute(builder: (_) => const TransectSetupScreen()),
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final screens = [
@@ -125,9 +163,7 @@ class _AppShellState extends State<AppShell> with RouteAware {
       floatingActionButton: FloatingActionButton(
         backgroundColor: AppColors.primary,
         tooltip: 'Start Transect Survey',
-        onPressed: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const TransectSetupScreen()),
-        ),
+        onPressed: _chooseStart,
         child: const Icon(Icons.add, color: Colors.white),
       ),
     );

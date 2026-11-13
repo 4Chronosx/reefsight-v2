@@ -26,6 +26,7 @@ import '../services/screen_awake.dart';
 import '../services/session_checkpointer.dart';
 import '../services/tracked_colony_record.dart';
 import '../services/transect_database.dart';
+import '../services/transect_placement.dart';
 import '../services/transect_recorder.dart';
 import '../services/transect_session.dart';
 import '../services/transect_video.dart';
@@ -42,6 +43,7 @@ import '../widgets/live/recording_indicator.dart';
 import '../widgets/live/tally_hud.dart';
 import '../widgets/underwater_background.dart';
 import 'app_shell.dart';
+import 'station_detail_screen.dart' show StationDetailScreen;
 import 'summary_screen.dart';
 
 /// Live segmentation + crop-classify + tracking screen (sub-plan 3:
@@ -71,6 +73,7 @@ class LiveTransectScreen extends StatefulWidget {
     this.observerName,
     this.entryFix,
     this.resultsHidden = false,
+    this.placement,
     this.screenAwake = const WakelockScreenAwake(),
     this.storageInfo = const PlatformDeviceInfo(),
     this.batteryInfo = const BatteryPlusInfo(),
@@ -95,6 +98,11 @@ class LiveTransectScreen extends StatefulWidget {
   /// overlay (it lists health labels) and the End sheet's count. The
   /// detection overlay stays: the diver needs it to aim the camera.
   final bool resultsHidden;
+
+  /// Issue #2: the station, transect number, depths and random placement of
+  /// a station transect, written with the session at insert. `null` for a
+  /// quick (station-less) transect.
+  final TransectPlacement? placement;
 
   /// Keeps the screen from auto-locking for exactly this Live session
   /// (sub-plan 11 step 1). Injectable for tests.
@@ -310,18 +318,17 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
     try {
       final documentsDir = await getApplicationDocumentsDirectory();
       db = await TransectDatabase.open(documentsDir.path);
-      final sessionId = await db.insertSession(
-        TransectSession(
-          startedAt: DateTime.now().toUtc(),
-          tapeLengthMeters: widget.tapeLengthMeters,
-          siteName: widget.siteName,
-          observerName: widget.observerName,
-          entryFix: widget.entryFix,
-          resultsHidden: widget.resultsHidden,
-          cropStyle: _frameProcessor.cropStyle,
-          thresholds: _thresholds,
-        ),
+      final session = TransectSession(
+        startedAt: DateTime.now().toUtc(),
+        tapeLengthMeters: widget.tapeLengthMeters,
+        siteName: widget.siteName,
+        observerName: widget.observerName,
+        entryFix: widget.entryFix,
+        resultsHidden: widget.resultsHidden,
+        cropStyle: _frameProcessor.cropStyle,
+        thresholds: _thresholds,
       );
+      final sessionId = await db.insertSession(widget.placement?.applyTo(session) ?? session);
       _db = db;
       _sessionId = sessionId;
       debugPrint(
@@ -603,9 +610,15 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       if (!mounted) return;
 
       if (sessionId != null) {
+        // Issue #2: a station transect's Summary sits on its station, so
+        // back from it returns there for the next transect, not to the shell.
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => SummaryScreen(sessionId: sessionId)),
-          ModalRoute.withName(AppShell.routeName),
+          widget.placement == null
+              ? ModalRoute.withName(AppShell.routeName)
+              : (route) =>
+                  route.settings.name == StationDetailScreen.routeName ||
+                  route.settings.name == AppShell.routeName,
         );
       } else {
         Navigator.of(context).pop();

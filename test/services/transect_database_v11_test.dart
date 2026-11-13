@@ -370,6 +370,22 @@ void main() {
       expect(list.first.pointSeed, 42);
     });
 
+    test('listUnassignedSessions has only the surveys without a station (#2)', () async {
+      await db.insertSession(_transect(station, 1));
+      final loose = await db.insertSession(_transect(null, null));
+      final unassigned = await db.listUnassignedSessions();
+      expect(unassigned.map((s) => s.session.id), [loose]);
+      expect((await db.listSessions()).length, 2);
+    });
+
+    test('ignoreClose: close() is a no-op, closeForTest() really closes', () async {
+      final shared = await TransectDatabase.openInMemoryForTest(ignoreClose: true);
+      await shared.close();
+      expect(await shared.listStations(), isEmpty);
+      await shared.closeForTest();
+      expect(shared.listStations(), throwsA(anything));
+    });
+
     test('nextTransectNumber is one past the highest used', () async {
       expect(await db.nextTransectNumber(station), 1);
       await db.insertSession(_transect(station, 1));

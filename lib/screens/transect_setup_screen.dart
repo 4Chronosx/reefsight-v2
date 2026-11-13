@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/app_database.dart';
@@ -6,6 +8,7 @@ import '../services/device_info.dart';
 import '../services/geo_fix.dart';
 import '../services/geo_fix_controller.dart';
 import '../services/location_provider.dart';
+import '../services/transect_placement.dart';
 import '../widgets/geo_fix_panel.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/ready_to_dive_card.dart';
@@ -24,9 +27,14 @@ class TransectStart {
     this.observerName,
     this.entryFix,
     this.resultsHidden = false,
+    this.placement,
   });
 
   final double tapeLengthMeters;
+
+  /// Issue #2: set by the station transect setup, `null` from this screen
+  /// (a quick transect, outside any station).
+  final TransectPlacement? placement;
   final String? siteName;
   final String? observerName;
 
@@ -39,11 +47,13 @@ class TransectStart {
   final GeoFix? entryFix;
 }
 
-typedef StartTransect = void Function(BuildContext context, TransectStart start);
+/// Completes when Live is left (issue #2: the station setup re-reads its
+/// transect numbers then). Callers that don't care can ignore it.
+typedef StartTransect = FutureOr<void> Function(BuildContext context, TransectStart start);
 
 /// The real [StartTransect]: pushes Live, which inserts the session.
-void pushLiveTransect(BuildContext context, TransectStart start) {
-  Navigator.of(context).push(
+Future<void> pushLiveTransect(BuildContext context, TransectStart start) {
+  return Navigator.of(context).push<void>(
     MaterialPageRoute(
       builder: (_) => LiveTransectScreen(
         tapeLengthMeters: start.tapeLengthMeters,
@@ -51,6 +61,7 @@ void pushLiveTransect(BuildContext context, TransectStart start) {
         observerName: start.observerName,
         entryFix: start.entryFix,
         resultsHidden: start.resultsHidden,
+        placement: start.placement,
       ),
     ),
   );

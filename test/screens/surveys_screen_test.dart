@@ -32,7 +32,9 @@ void main() {
       find.text('Completed and in-progress surveys will show up here.'),
       findsOneWidget,
     );
-    expect(find.text('Start your first survey'), findsOneWidget);
+    // Issue #2: a station first, the quick transect one tap below it.
+    expect(find.text('New station'), findsOneWidget);
+    expect(find.text('Quick transect (no station)'), findsOneWidget);
   });
 
   testWidgets(

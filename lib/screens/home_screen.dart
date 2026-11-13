@@ -4,6 +4,7 @@ import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/report_data.dart';
 import '../services/session_summary.dart';
+import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/health_chip.dart';
 import '../widgets/logo_badge.dart';
@@ -54,7 +55,15 @@ class _HomeScreenState extends State<HomeScreen> {
     final db = await widget.openDatabase();
     try {
       final all = await db.listSessions();
-      return all.take(3).toList(growable: false);
+      // Issue #2: photo and preliminary station transects aren't colony
+      // surveys -- Summary would read one as a crashed recording. They're
+      // reached through their station instead.
+      return all
+          .where((s) =>
+              s.session.stationId == null ||
+              s.session.captureSource == CaptureSource.legacyColony)
+          .take(3)
+          .toList(growable: false);
     } finally {
       await db.close();
     }

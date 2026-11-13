@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/app_shell.dart';
+import 'package:reefsight_mobile/screens/station_edit_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
 
 // Sub-plan 6 (ui-ux-overhaul), step 8: "The shell renders all three tabs,
@@ -27,7 +28,8 @@ void main() {
     expect(find.text('Settings'), findsOneWidget);
   });
 
-  testWidgets('the centre action pushes Transect Setup', (tester) async {
+  // Issue #2: the centre action offers a station or a quick transect.
+  testWidgets('the centre action offers New station and Quick transect', (tester) async {
     await tester.pumpWidget(_wrap(const AppShell()));
     await tester.pump();
 
@@ -35,7 +37,26 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
+    expect(find.text('New station'), findsOneWidget);
+    await tester.tap(find.text('Quick transect (no station)'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
     expect(find.byType(TransectSetupScreen), findsOneWidget);
+  });
+
+  testWidgets('New station opens the station form', (tester) async {
+    await tester.pumpWidget(_wrap(const AppShell()));
+    await tester.pump();
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('New station'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(StationEditScreen), findsOneWidget);
   });
 
   testWidgets('tapping a tab switches the visible IndexedStack child',

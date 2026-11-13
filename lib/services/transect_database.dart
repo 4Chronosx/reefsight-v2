@@ -23,9 +23,10 @@ import 'transect_session.dart';
 /// transect_sessions` is the minimal addition that makes that well-defined,
 /// not a speculative extra layer.
 class TransectDatabase {
-  TransectDatabase._(this._db);
+  TransectDatabase._(this._db, {bool ignoreClose = false}) : _ignoreClose = ignoreClose;
 
   final Database _db;
+  final bool _ignoreClose;
 
   static const _sessionsTable = 'transect_sessions';
   static const _coloniesTable = 'tracked_colonies';
@@ -85,7 +86,12 @@ class TransectDatabase {
   /// the default `singleInstance: true` caching can otherwise hand back a
   /// *shared* cached instance across separate `openInMemoryForTest()` calls
   /// instead of an independent database per call.
-  static Future<TransectDatabase> openInMemoryForTest() async {
+  ///
+  /// [ignoreClose] (issue #2): screens open and close the database per
+  /// operation, which would close a shared in-memory test database after
+  /// the first one. With it set, [close] does nothing and the test calls
+  /// [closeForTest] in its tear-down.
+  static Future<TransectDatabase> openInMemoryForTest({bool ignoreClose = false}) async {
     final db = await openDatabase(
       inMemoryDatabasePath,
       version: _schemaVersion,
@@ -93,7 +99,7 @@ class TransectDatabase {
       onCreate: (db, version) => _createSchema(db),
       onOpen: (db) => db.execute('PRAGMA foreign_keys = ON'),
     );
-    return TransectDatabase._(db);
+    return TransectDatabase._(db, ignoreClose: ignoreClose);
   }
 
   static Future<void> _createSchema(Database db) async {
@@ -616,6 +622,12 @@ class TransectDatabase {
   /// diver decides whether to keep it ([deleteSession]).
   Future<List<SessionSummary>> listSessions() => _sessionSummaries();
 
+  /// Issue #2: the Surveys tab's **Unassigned** group -- every survey not in
+  /// a station (all of them before v11, and quick transects since). Station
+  /// transects are listed under their station instead.
+  Future<List<SessionSummary>> listUnassignedSessions() =>
+      _sessionSummaries(where: 's.station_id IS NULL');
+
   /// Sub-plan 19 step 2: the latest survey of the same site before
   /// [before], for the Executive tab's "compared with the last survey".
   /// "Same site" is the site name trimmed and case-insensitive for now
@@ -958,5 +970,8 @@ class TransectDatabase {
     return rows.map(TransectCoverRow.fromMap).toList(growable: false);
   }
 
-  Future<void> close() => _db.close();
+  Future<void> close() => _ignoreClose ? Future.value() : _db.close();
+
+  /// Closes a database opened with `openInMemoryForTest(ignoreClose: true)`.
+  Future<void> closeForTest() => _db.close();
 }
