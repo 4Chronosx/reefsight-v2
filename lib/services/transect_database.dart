@@ -636,7 +636,10 @@ class TransectDatabase {
   /// sessions (a partial transect isn't comparable) and sessions whose
   /// results are still hidden for a blinded recount (sub-plan 14): showing
   /// their prevalence here would unblind it (`results_hidden` is NULL on
-  /// rows from before schema v7, which were never hidden). `null` when [siteName] is
+  /// rows from before schema v7, which were never hidden). Issue #3: skips
+  /// the other transects of [excludingId]'s own station too -- they are
+  /// replicates of one survey, not an earlier one -- and photo/preliminary
+  /// station transects, which have no colonies to compare. `null` when [siteName] is
   /// missing or blank, or nothing matches. [before] is compared as a
   /// `DateTime` rather than in SQL because `started_at` strings aren't
   /// stored normalized to UTC.
@@ -653,8 +656,11 @@ class TransectDatabase {
         AND s.ended_at IS NOT NULL
         AND (COALESCE(s.results_hidden, 0) != 1 OR s.results_revealed_at IS NOT NULL)
         AND s.id != ?
+        AND (s.station_id IS NULL
+             OR (s.station_id IS NOT (SELECT station_id FROM $_sessionsTable WHERE id = ?)
+                 AND s.station_id IN (SELECT id FROM $_stationsTable WHERE survey_type = ?)))
       ''',
-      whereArgs: [site, excludingId],
+      whereArgs: [site, excludingId, excludingId, SurveyType.colonyCount.db],
     );
     for (final candidate in candidates) {
       if (candidate.session.startedAt.isBefore(before)) return candidate;
@@ -763,6 +769,14 @@ class TransectDatabase {
     return rows.map(TransectSession.fromMap).toList(growable: false);
   }
 
+  /// Issue #3: a station's transects with their colony counts, keyed by
+  /// session id -- the colony-count station screen's per-transect results
+  /// (one query, like [listSessions]).
+  Future<Map<int, SessionSummary>> colonyResultsForStation(int stationId) async {
+    final summaries = await _sessionSummaries(where: 's.station_id = ?', whereArgs: [stationId]);
+    return {for (final s in summaries) s.session.id!: s};
+  }
+
   /// One past the station's highest transect number (1 for a new station).
   /// Not a gap-filler: after deleting transect 2 of 1-3 it still says 4, so
   /// numbers already on a datasheet are never reused. The 3-5 limit is the
@@ -799,11 +813,30 @@ class TransectDatabase {
     );
   }
 
+  /// Issue #3: colony count is a research mode reported separately from the
+  /// bulletins (alignment doc §10), so its transects never get frames,
+  /// points or cover -- nothing downstream can mix them into a station
+  /// cover summary. Writing them is the caller's bug: thrown.
+  Future<void> _rejectColonyCount(int sessionId, String what) async {
+    final rows = await _db.rawQuery('''
+      SELECT st.survey_type AS type
+      FROM $_sessionsTable s JOIN $_stationsTable st ON st.id = s.station_id
+      WHERE s.id = ?
+    ''', [sessionId]);
+    if (rows.isNotEmpty && rows.single['type'] == SurveyType.colonyCount.db) {
+      throw ArgumentError('Colony-count transect $sessionId takes no $what (research mode, #3)');
+    }
+  }
+
   /// Throws a [DatabaseException] for a second frame at the same meter mark
   /// of the same transect (`UNIQUE (session_id, meter_mark)`). Video frames
-  /// have no meter mark, and NULLs never collide in SQLite.
-  Future<int> insertFrame(TransectFrame frame) =>
-      _db.insert(_framesTable, frame.toMap()..remove('id'));
+  /// have no meter mark, and NULLs never collide in SQLite. Throws an
+  /// [ArgumentError] for a colony-count transect (#3); points need a frame,
+  /// so this guards them too.
+  Future<int> insertFrame(TransectFrame frame) async {
+    await _rejectColonyCount(frame.sessionId, 'frames');
+    return _db.insert(_framesTable, frame.toMap()..remove('id'));
+  }
 
   /// Along the tape: by meter mark, then video time for preliminary frames.
   Future<List<TransectFrame>> framesForSession(int sessionId) async {
@@ -943,13 +976,15 @@ class TransectDatabase {
 
   /// Replaces a transect's cached cover with [rows], in one transaction --
   /// a category that's gone from the new result is gone from the cache, not
-  /// left over from the last run. Every row must be for [sessionId].
+  /// left over from the last run. Every row must be for [sessionId], and it
+  /// must not be a colony-count transect (#3).
   Future<void> replaceTransectCover(int sessionId, List<TransectCoverRow> rows) async {
     for (final row in rows) {
       if (row.sessionId != sessionId) {
         throw ArgumentError('Cover row for session ${row.sessionId} passed for session $sessionId');
       }
     }
+    await _rejectColonyCount(sessionId, 'cover');
     await _db.transaction((txn) async {
       await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
       final batch = txn.batch();

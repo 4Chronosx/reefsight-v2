@@ -357,12 +357,48 @@ class _LiveTransectScreenState extends State<LiveTransectScreen>
       if (!_disposed) _checkpointer!.start();
     } catch (error) {
       await db?.close();
+      // Review fix: a failure after the insert (photo store, checkpointer)
+      // must not leave Live writing to the handle just closed -- and the
+      // station-transect refusal below keys on `_sessionId`.
+      _db = null;
+      _sessionId = null;
       debugPrint('ReefSight: failed to start transect session: $error');
       if (mounted) setState(() => _persistError = error.toString());
     }
 
     if (_disposed) return;
+    // Issue #3 (deferred from #2's review): a station transect that has no
+    // row would record a whole dive that never appears under its station,
+    // so it doesn't record at all -- the diver goes back to setup and starts
+    // again. A quick transect keeps recording with the banner, as before.
+    final placement = widget.placement;
+    if (placement != null && _sessionId == null) {
+      await _refuseUnsavedStationTransect(placement);
+      return;
+    }
     await _startRecording();
+  }
+
+  Future<void> _refuseUnsavedStationTransect(TransectPlacement placement) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text('T${placement.transectNumber} was not saved'),
+        content: Text(
+          'Recording did not start, so nothing is lost. Go back and start the '
+          'transect again.\n\n${_persistError ?? ''}',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Back to setup'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) Navigator.of(context).pop();
   }
 
   /// After the camera view attaches, how long the native session gets to

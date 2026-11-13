@@ -66,7 +66,11 @@ any non-trivial architecture decision.
   Stations list (with an Unassigned group), create/edit, station detail, per-transect setup with
   TB 2019-04 random placement and flags, and routing by survey type (colony count to Live; photo and
   preliminary to a placeholder until #4 and #13).
-- **Next: #3**, colony-count mode as a station survey type.
+- **#3 Colony-count mode as a station survey type** (`sub-plans/22-colony-count-stations.md`):
+  **done 2026-11-14.** Station and T-number on the per-transect report and CSVs, a research label
+  everywhere, a database guard that keeps colony-count transects out of frames and cover, and Live
+  refusing to record a station transect it couldn't save.
+- **Next: #4**, in-app photo capture.
 
 ## Explicitly out of scope for now
 

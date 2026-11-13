@@ -8,10 +8,13 @@ import 'package:reefsight_mobile/screens/home_screen.dart';
 import 'package:reefsight_mobile/screens/station_detail_screen.dart';
 import 'package:reefsight_mobile/screens/station_edit_screen.dart';
 import 'package:reefsight_mobile/screens/station_transect_setup_screen.dart';
+import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/surveys_screen.dart';
 import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
+import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_placement.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -63,6 +66,28 @@ TransectSession _transect(int stationId, int number, {double tape = 50, double? 
     );
 
 Finder _field(String key) => find.byKey(ValueKey(key));
+
+/// Issue #3: [bleached] bleached and [healthy] healthy colonies on a
+/// colony-count transect, as Live's recorder writes them.
+Future<void> _colonies(TransectDatabase db, int sessionId, {required int bleached, required int healthy}) async {
+  final at = DateTime.utc(2026, 11, 15, 2);
+  var trackId = 0;
+  for (final label in [
+    for (var i = 0; i < bleached; i++) HealthAggregator.bleachedLabel,
+    for (var i = 0; i < healthy; i++) HealthAggregator.healthyLabel,
+  ]) {
+    await db.upsertColony(
+      TrackedColonyRecord(
+        sessionId: sessionId,
+        trackId: ++trackId,
+        healthLabel: label,
+        healthHistory: const [],
+        firstSeenAt: at,
+        lastSeenAt: at,
+      ),
+    );
+  }
+}
 
 /// A host screen with a button that pushes [screen], recording what it
 /// pops with -- the edit screen pops the saved station's id.
@@ -460,6 +485,128 @@ void main() {
       expect(tester.widget<ElevatedButton>(add).onPressed, isNull);
       expect(find.text(kFlagFewTransects), findsNothing);
     });
+
+    // Issue #3: a colony-count station is labelled research, its rows show
+    // each transect's own colony results (never pooled into a cover
+    // summary), and a blinded recount stays blinded.
+    testWidgets('colony count: research label, per-transect results, hidden stays hidden',
+        (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station(type: SurveyType.colonyCount));
+      final t1 = await db.insertSession(_transect(id, 1));
+      await db.closeSession(t1, DateTime.utc(2026, 11, 15, 1, 40));
+      await _colonies(db, t1, bleached: 1, healthy: 2);
+      final t2 = await db.insertSession(_transect(id, 2).copyWith(resultsHidden: true));
+      await _colonies(db, t2, bleached: 4, healthy: 0);
+
+      await tester.pumpWidget(MaterialApp(
+        home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text(kResearchScopeNote), findsOneWidget);
+      expect(find.textContaining('3 colonies'), findsOneWidget);
+      expect(find.textContaining('4 colonies'), findsNothing);
+      expect(find.text('Results hidden — recount pending'), findsOneWidget);
+      expect(find.text(kColonyCountNoStationSummary), findsOneWidget);
+      expect(find.textContaining('coming with #8'), findsNothing);
+    });
+
+    testWidgets('photo stations keep the #8 placeholder and no research label', (tester) async {
+      _useTallSurface(tester);
+      final db = await _db();
+      final id = await db.insertStation(_station());
+      await tester.pumpWidget(MaterialApp(
+        home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text(kResearchScopeNote), findsNothing);
+      expect(find.textContaining('coming with #8'), findsOneWidget);
+    });
+  });
+
+  // Issue #3's "Done when": a colony-count station records transects as the
+  // current app does, grouped under the station. Live needs the camera, so
+  // the stub does what Live does at start and end: insert the session with
+  // the placement, record colonies, close it.
+  testWidgets('end to end: three colony-count transects, each with its own Summary',
+      (tester) async {
+    _useTallSurface(tester);
+    final db = await _db();
+    final id = await db.insertStation(_station(type: SurveyType.colonyCount));
+    final fake = FakeDevice();
+    final started = <TransectPlacement>[];
+
+    Future<void> fakeLive(BuildContext context, TransectStart start) async {
+      final placement = start.placement!;
+      started.add(placement);
+      final session = placement.applyTo(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 11, 15, placement.transectNumber),
+          tapeLengthMeters: start.tapeLengthMeters,
+          siteName: start.siteName,
+          observerName: start.observerName,
+        ),
+      );
+      final sessionId = await db.insertSession(session);
+      await _colonies(db, sessionId, bleached: 1, healthy: placement.transectNumber);
+      await db.closeSession(sessionId, session.startedAt.add(const Duration(minutes: 40)));
+    }
+
+    await tester.pumpWidget(MaterialApp(
+      home: StationDetailScreen(
+        stationId: id,
+        openDatabase: () async => db,
+        buildTransectSetup: (station) => StationTransectSetupScreen(
+          station: station,
+          openDatabase: () async => db,
+          storageInfo: fake,
+          batteryInfo: fake,
+          thermalInfo: fake,
+          locationProvider: FakeLocationProvider.fix(),
+          startTransect: fakeLive,
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    for (var n = 1; n <= 3; n++) {
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Add transect'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(ElevatedButton, 'Start Transect'));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byType(StationDetailScreen), findsOneWidget);
+    }
+
+    expect(started.map((p) => p.transectNumber), [1, 2, 3]);
+    expect(started.every((p) => p.captureSource == CaptureSource.legacyColony), isTrue);
+    final transects = await db.transectsForStation(id);
+    expect(transects.map((t) => t.transectNumber), [1, 2, 3]);
+    expect(find.text('Complete'), findsNWidgets(3));
+    for (var n = 1; n <= 3; n++) {
+      expect(find.textContaining('${n + 1} colonies'), findsOneWidget);
+    }
+    expect(find.text(kFlagFewTransects), findsNothing);
+    // Colony count never reaches the cover tables.
+    for (final t in transects) {
+      expect(await db.coverForSession(t.id!), isEmpty);
+      expect(await db.framesForSession(t.id!), isEmpty);
+    }
+
+    // Each transect opens its own Summary, named by station and T-number.
+    // Bounded pumps, not pumpAndSettle: a finished transect's Summary shows
+    // the exit-fix panel, whose GPS spinner never settles under test.
+    await tester.tap(find.text('T2'));
+    for (var i = 0; i < 3; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+    expect(find.byType(SummaryScreen), findsOneWidget);
+    expect(find.text('ALG-S1 · T2'), findsWidgets);
   });
 
   testWidgets('Home recent surveys skip photo and preliminary station transects', (tester) async {

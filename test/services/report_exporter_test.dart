@@ -2,11 +2,14 @@ import 'dart:io';
 
 import 'package:csv/csv.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:reefsight_mobile/services/recount.dart';
 import 'package:reefsight_mobile/services/report_exporter.dart';
 import 'package:reefsight_mobile/services/session_summary.dart';
+import 'package:reefsight_mobile/services/station.dart';
+import 'package:reefsight_mobile/services/station_checks.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -269,6 +272,95 @@ void main() {
       ]) {
         expect(row[column], '', reason: column);
       }
+    });
+
+    // Issue #3: a colony-count station transect's files carry the station
+    // and transect, in the name (T1-T5 no longer sort by start time alone)
+    // and in four columns at the end -- the earlier columns stay put.
+    group('station transects (#3)', () {
+      final station = Station(
+        id: 3,
+        code: 'ALG S1/x',
+        surveyType: SurveyType.colonyCount,
+        surveyedOn: DateTime(2026, 11, 15),
+        createdAt: DateTime.utc(2026, 11, 14),
+      );
+      final t2 = TransectSession(
+        startedAt: DateTime.utc(2026, 11, 15, 2),
+        tapeLengthMeters: 50,
+        siteName: 'Alegria MPA',
+        stationId: 3,
+        transectNumber: 2,
+      );
+
+      test('the station columns come last, after the existing ones', () {
+        final headers = ReportExporter.sessionCsvHeaders;
+        expect(headers.sublist(headers.length - 4), [
+          'Station',
+          'Transect',
+          'Survey Type',
+          'Report Scope',
+        ]);
+        expect(headers.first, 'Site');
+      });
+
+      test('both files are named with the sanitized station and T-number', () async {
+        final colonyPath = await ReportExporter.exportCsv(
+          outputDirectory: tempDir.path,
+          session: t2,
+          colonies: const [],
+          station: station,
+        );
+        final sessionPath = await ReportExporter.exportSessionCsv(
+          outputDirectory: tempDir.path,
+          session: t2,
+          station: station,
+        );
+
+        final name = p.basename(colonyPath);
+        expect(name, startsWith('reefsight_Alegria_MPA_ALG_S1_x_T2_2026-11-15T02-00-00'));
+        expect(sessionPath, colonyPath.replaceFirst(RegExp(r'\.csv$'), '_session.csv'));
+        expect(p.equals(p.dirname(colonyPath), tempDir.path), isTrue);
+      });
+
+      test('the session row says which station and that it is research', () async {
+        final path = await ReportExporter.exportSessionCsv(
+          outputDirectory: tempDir.path,
+          session: t2,
+          station: station,
+        );
+        final row = Map.fromIterables(
+          ReportExporter.sessionCsvHeaders,
+          (await readRows(path))[1].map((cell) => cell.toString()),
+        );
+        expect(row['Station'], 'ALG S1/x');
+        expect(row['Transect'], '2');
+        expect(row['Survey Type'], 'colony_count');
+        expect(row['Report Scope'], kResearchScopeNote);
+      });
+
+      test('a quick transect leaves them empty and keeps its old name', () async {
+        final quick = TransectSession(
+          startedAt: DateTime.utc(2026, 11, 15, 2),
+          tapeLengthMeters: 50,
+          siteName: 'Alegria MPA',
+        );
+        final path = await ReportExporter.exportSessionCsv(
+          outputDirectory: tempDir.path,
+          session: quick,
+        );
+        final row = Map.fromIterables(
+          ReportExporter.sessionCsvHeaders,
+          (await readRows(path))[1].map((cell) => cell.toString()),
+        );
+        for (final column in ['Station', 'Transect', 'Survey Type', 'Report Scope']) {
+          expect(row[column], '', reason: column);
+        }
+        expect(
+          p.basename(path),
+          'reefsight_Alegria_MPA_2026-11-15T02-00-00_session.csv',
+        );
+      });
     });
   });
 

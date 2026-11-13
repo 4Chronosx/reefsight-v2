@@ -13,6 +13,8 @@ import 'package:reefsight_mobile/services/device_checks.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/recount.dart';
+import 'package:reefsight_mobile/services/station.dart';
+import 'package:reefsight_mobile/services/station_checks.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -138,6 +140,63 @@ void main() {
 
     expect(find.text('Marigondon Reef'), findsOneWidget);
     expect(find.textContaining('75m transect'), findsOneWidget);
+  });
+
+  // Issue #3: a colony-count station transect's report names its station
+  // and transect and is labelled a research survey; a quick transect's
+  // header is unchanged.
+  group('station transects (#3)', () {
+    Future<void> pumpFor(WidgetTester tester, TransectDatabase db, int sessionId) async {
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MaterialApp(home: SummaryScreen(sessionId: sessionId, openDatabase: () async => db)),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the header shows the station, transect and research label', (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final station = await db.insertStation(
+        Station(
+          code: 'ALG-S1',
+          surveyType: SurveyType.colonyCount,
+          surveyedOn: DateTime(2026, 11, 15),
+          createdAt: DateTime.utc(2026, 11, 14),
+        ),
+      );
+      final sessionId = await db.insertSession(
+        TransectSession(
+          startedAt: DateTime.utc(2026, 11, 15, 2),
+          tapeLengthMeters: 50,
+          siteName: 'Alegria MPA',
+          stationId: station,
+          transectNumber: 2,
+          captureSource: CaptureSource.legacyColony,
+        ),
+      );
+
+      await pumpFor(tester, db, sessionId);
+
+      expect(find.byKey(const ValueKey('summary-station-line')), findsOneWidget);
+      expect(find.text('ALG-S1 · T2'), findsWidgets);
+      expect(find.text(kResearchScopeNote), findsWidgets);
+    });
+
+    testWidgets('a quick transect has no station line', (tester) async {
+      final db = await TransectDatabase.openInMemoryForTest();
+      addTearDown(db.close);
+      final sessionId = await db.insertSession(
+        TransectSession(startedAt: DateTime.utc(2026, 11, 15), tapeLengthMeters: 50, siteName: 'X'),
+      );
+
+      await pumpFor(tester, db, sessionId);
+
+      expect(find.byKey(const ValueKey('summary-station-line')), findsNothing);
+      expect(find.text(kResearchScopeNote), findsNothing);
+    });
   });
 
   // Sub-plan 10, step 3: prevalence is computed over confidently classified

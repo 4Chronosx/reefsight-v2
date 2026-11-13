@@ -4,6 +4,8 @@ import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/report_data.dart';
 import 'package:reefsight_mobile/services/session_summary.dart';
+import 'package:reefsight_mobile/services/station.dart';
+import 'package:reefsight_mobile/services/station_checks.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_metrics.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
@@ -305,6 +307,61 @@ void main() {
           ('Tape length', '50 m'),
         ],
       );
+    });
+  });
+
+  // Issue #3: a colony-count station transect says which station and
+  // transect it is, and that it's a research survey.
+  group('station transects (#3)', () {
+    final station = Station(
+      id: 7,
+      code: 'ALG-S1',
+      surveyType: SurveyType.colonyCount,
+      surveyedOn: DateTime(2026, 11, 15),
+      createdAt: DateTime.utc(2026, 11, 14),
+    );
+    final t2 = TransectSession(
+      id: 2,
+      startedAt: _oct5,
+      endedAt: _oct5.add(const Duration(hours: 1)),
+      tapeLengthMeters: 50,
+      siteName: 'Gilutongan',
+      observerName: 'J. Cruz',
+      stationId: 7,
+      transectNumber: 2,
+    );
+
+    test('details add the station, transect and survey scope after the site', () {
+      final report = TransectReport(session: t2, colonies: const [], station: station);
+
+      expect(ExecutiveSummary.build(report).details, [
+        ('Date', '5 Oct 2026, 08:30'),
+        ('Site', 'Gilutongan'),
+        ('Station', 'ALG-S1 · T2'),
+        ('Survey', kResearchScopeNote),
+        ('Observer', 'J. Cruz'),
+        ('Tape length', '50 m'),
+      ]);
+    });
+
+    test('never compares with another transect of the same station', () {
+      final t1 = SessionSummary(
+        session: TransectSession(
+          id: 1,
+          startedAt: _sep12,
+          endedAt: _sep12.add(const Duration(hours: 1)),
+          tapeLengthMeters: 50,
+          siteName: 'Gilutongan',
+          stationId: 7,
+          transectNumber: 1,
+        ),
+        colonyCount: 20,
+        bleachedCount: 1,
+        classifiedCount: 20,
+      );
+      final report = TransectReport(session: t2, colonies: const [], station: station);
+
+      expect(ExecutiveSummary.build(report, previous: t1).comparison, isNull);
     });
   });
 }

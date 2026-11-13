@@ -172,4 +172,17 @@ void main() {
       expect(reefZoneLabel(v), isNotEmpty);
     }
   });
+
+  // Issue #3: the one filter the station summary (#8) uses, so colony
+  // counts never reach a bulletin cover summary.
+  test('only photo and preliminary transects report bulletin cover', () {
+    expect(reportsBulletinCover(SurveyType.photoTransect), isTrue);
+    expect(reportsBulletinCover(SurveyType.preliminaryVideo), isTrue);
+    expect(reportsBulletinCover(SurveyType.colonyCount), isFalse);
+  });
+
+  test('the research-scope note names the bulletins it is outside of', () {
+    expect(kResearchScopeNote, contains('TB 2019-04'));
+    expect(kResearchScopeNote, contains('TB 2017-05'));
+  });
 }

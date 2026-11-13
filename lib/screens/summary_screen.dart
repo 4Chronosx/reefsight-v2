@@ -18,6 +18,8 @@ import '../services/recount_comparison.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
 import '../services/session_summary.dart';
+import '../services/station.dart';
+import '../services/station_checks.dart';
 import '../services/tracked_colony_record.dart';
 import '../services/transect_session.dart';
 import '../services/transect_video.dart';
@@ -137,7 +139,18 @@ class _SummaryScreenState extends State<SummaryScreen> {
         // No comparison is better than no report.
         debugPrint('ReefSight: failed to look up the previous survey: $error');
       }
-      return TransectReport(session: session, colonies: colonies);
+      // Issue #3: a station transect's report names its station. A failed
+      // read loses the station line, not the report.
+      Station? station;
+      final stationId = session.stationId;
+      if (stationId != null) {
+        try {
+          station = await db.stationById(stationId);
+        } catch (error) {
+          debugPrint('ReefSight: failed to read station $stationId: $error');
+        }
+      }
+      return TransectReport(session: session, colonies: colonies, station: station);
     } finally {
       await db.close();
     }
@@ -314,6 +327,7 @@ class _ReportHeader extends StatelessWidget {
               fontSize: 12,
             ),
           ),
+          if (report.station case final station?) _StationLine(station: station, session: session),
           _FixesLine(session: session),
           ?exitFix,
           _SessionNotice(report: report, hideCounts: hideCounts),
@@ -671,6 +685,51 @@ class _RecountFormState extends State<_RecountForm> {
 /// survey from Surveys must not stamp wherever the phone is today as the
 /// dive's exit.
 const kExitGpsWindow = Duration(hours: 12);
+
+/// Issue #3: "ALG-S1 · T2" and, for colony count, the research-scope label
+/// -- its counts and prevalence are reported here, per transect, and never
+/// in a bulletin cover summary.
+class _StationLine extends StatelessWidget {
+  const _StationLine({required this.station, required this.session});
+
+  final Station station;
+  final TransectSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const ValueKey('summary-station-line'),
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            stationTransectLabel(station, session),
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: AppColors.primary,
+            ),
+          ),
+          if (!reportsBulletinCover(station.surveyType))
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: AppColors.unknown.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                kResearchScopeNote,
+                style: TextStyle(fontSize: 11, color: AppColors.onSurface),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
 
 /// Sub-plan 12 step 5: both surface fixes in the shared header, plus the
 /// entry-exit distance next to the tape length as a QA check for a human
@@ -1255,6 +1314,7 @@ class _TechnicalTabState extends State<_TechnicalTab> {
         outputDirectory: documentsDir.path,
         session: widget.report.session,
         colonies: widget.report.colonies,
+        station: widget.report.station,
       );
       // Sub-plan 12 step 5: the session CSV (both GPS fixes) goes with it --
       // and, sub-plan 14, the recount comparison.
@@ -1262,6 +1322,7 @@ class _TechnicalTabState extends State<_TechnicalTab> {
         outputDirectory: documentsDir.path,
         session: widget.report.session,
         colonies: widget.report.colonies,
+        station: widget.report.station,
       );
       if (!mounted) return;
       setState(() {

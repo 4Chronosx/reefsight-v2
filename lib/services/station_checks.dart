@@ -16,6 +16,31 @@ const kStandardTapeM = 50.0;
 const kMinTransects = 3;
 const kMaxTransects = 5;
 
+/// Issue #3: colony count is a research mode outside the bulletins
+/// (alignment doc §10). Its colony counts and bleaching prevalence are
+/// reported per transect and never enter a bulletin cover summary: the
+/// station summary (#8) takes only the types this says yes to. Preliminary
+/// is bulletin-style but stamped PRELIMINARY (#13).
+bool reportsBulletinCover(SurveyType type) => switch (type) {
+      SurveyType.photoTransect || SurveyType.preliminaryVideo => true,
+      SurveyType.colonyCount => false,
+    };
+
+/// Issue #3: the label on every colony-count station, report and export.
+const kResearchScopeNote = 'Research survey, outside DENR-BMB TB 2019-04 and TB 2017-05';
+
+/// Issue #3: where a bulletin station has its Station summary button (#8).
+const kColonyCountNoStationSummary =
+    'Colony-count results are reported per transect: open a transect for its '
+    'report. They are never pooled into a bulletin cover summary.';
+
+/// Issue #3: "ALG-S1 · T2", the report header's and export's name for a
+/// station transect (just the code if it somehow has no number).
+String stationTransectLabel(Station station, TransectSession transect) {
+  final n = transect.transectNumber;
+  return n == null ? station.code : '${station.code} · T$n';
+}
+
 const kFlagStationTooDeep = 'Station deeper than 6 m (TB 2019-04 maximum)';
 const kFlagFewTransects = 'Fewer than 3 transects (TB 2019-04 minimum)';
 const kFlagTransectTooDeep = 'Deeper than 6 m';

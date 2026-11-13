@@ -7,6 +7,8 @@ import 'geo_fix.dart';
 import 'recount_comparison.dart';
 import 'report_data.dart';
 import 'session_summary.dart';
+import 'station.dart';
+import 'station_checks.dart';
 import 'tracked_colony_record.dart';
 import 'transect_session.dart';
 
@@ -71,14 +73,21 @@ class ReportExporter {
   }
 
   /// `reefsight_<site>_<start time>` -- shared by the colony CSV and the
-  /// session CSV, so the two files from one transect sort together.
-  static String _baseName(TransectSession session) {
+  /// session CSV, so the two files from one transect sort together. Issue
+  /// #3: a station transect is `reefsight_<site>_<station>_T<n>_<start>`,
+  /// so a station's T1-T5 are told apart by name; the station code is free
+  /// text too, so it is sanitized the same way.
+  static String _baseName(TransectSession session, Station? station) {
     final timestamp = session.startedAt
         .toIso8601String()
         .replaceAll(':', '-')
         .replaceAll('.', '-')
         .substring(0, 19);
-    return 'reefsight_${_sanitizeForFilename(session.siteName)}_$timestamp';
+    final site = _sanitizeForFilename(session.siteName);
+    if (station == null) return 'reefsight_${site}_$timestamp';
+    final number = session.transectNumber;
+    final transect = number == null ? '' : '_T$number';
+    return 'reefsight_${site}_${_sanitizeForFilename(station.code)}${transect}_$timestamp';
   }
 
   static Future<String> _write(
@@ -95,8 +104,9 @@ class ReportExporter {
     required String outputDirectory,
     required TransectSession session,
     required List<TrackedColonyRecord> colonies,
+    Station? station,
   }) {
-    return _write(outputDirectory, '${_baseName(session)}.csv', [
+    return _write(outputDirectory, '${_baseName(session, station)}.csv', [
       csvHeaders,
       ...colonies.map(_csvRow),
     ]);
@@ -125,7 +135,29 @@ class ReportExporter {
     'Entry-Exit Distance (m)',
     ..._recountHeaders,
     ..._intervalHeaders,
+    ..._stationHeaders,
   ];
+
+  /// Issue #3: last, so every earlier column keeps its position for
+  /// existing sheets and scripts. Empty for a quick transect. "Report
+  /// Scope" says a colony-count transect is research, outside the
+  /// bulletins (alignment doc §10).
+  static const List<String> _stationHeaders = [
+    'Station',
+    'Transect',
+    'Survey Type',
+    'Report Scope',
+  ];
+
+  static List<dynamic> _stationCells(TransectSession session, Station? station) {
+    if (station == null) return const ['', '', '', ''];
+    return [
+      station.code,
+      session.transectNumber ?? '',
+      station.surveyType.db,
+      reportsBulletinCover(station.surveyType) ? '' : kResearchScopeNote,
+    ];
+  }
 
   /// Sub-plan 17: the prevalence and density the app shows, with their 95%
   /// bounds (Wilson on bleached/classified; exact Poisson on the count over
@@ -245,13 +277,14 @@ class ReportExporter {
     required String outputDirectory,
     required TransectSession session,
     List<TrackedColonyRecord>? colonies,
+    Station? station,
   }) {
     final entry = session.entryFix;
     final exit = session.exitFix;
     final report = colonies == null
         ? null
         : TransectReport(session: session, colonies: colonies);
-    return _write(outputDirectory, '${_baseName(session)}_session.csv', [
+    return _write(outputDirectory, '${_baseName(session, station)}_session.csv', [
       sessionCsvHeaders,
       [
         session.siteName ?? '',
@@ -270,6 +303,7 @@ class ReportExporter {
           appClassified: report?.classifiedCount,
         ),
         ..._intervalCells(report),
+        ..._stationCells(session, station),
       ],
     ]);
   }

@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/geo_fix.dart';
+import '../services/report_data.dart';
 import '../services/session_files.dart';
+import '../services/session_summary.dart';
 import '../services/station.dart';
 import '../services/station_checks.dart';
 import '../services/transect_session.dart';
@@ -57,10 +59,14 @@ class StationDetailScreen extends StatefulWidget {
 }
 
 class _StationData {
-  const _StationData(this.station, this.transects);
+  const _StationData(this.station, this.transects, [this.colonyResults = const {}]);
 
   final Station? station;
   final List<TransectSession> transects;
+
+  /// Issue #3: each colony-count transect's own counts, by session id.
+  /// Empty for photo and preliminary stations.
+  final Map<int, SessionSummary> colonyResults;
 }
 
 class _StationDetailScreenState extends State<StationDetailScreen> with RouteAware {
@@ -91,7 +97,10 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
       final station = await db.stationById(widget.stationId);
       final transects =
           station == null ? const <TransectSession>[] : await db.transectsForStation(widget.stationId);
-      return _StationData(station, transects);
+      final results = station?.surveyType == SurveyType.colonyCount
+          ? await db.colonyResultsForStation(widget.stationId)
+          : const <int, SessionSummary>{};
+      return _StationData(station, transects, results);
     } finally {
       await db.close();
     }
@@ -124,7 +133,7 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
 
   void _openTransect(Station station, TransectSession t) => _push(
         station.surveyType == SurveyType.colonyCount
-            ? SummaryScreen(sessionId: t.id!)
+            ? SummaryScreen(sessionId: t.id!, openDatabase: widget.openDatabase)
             : CapturePlaceholderScreen(
                 station: station,
                 sessionId: t.id!,
@@ -233,6 +242,7 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                           transect: t,
                           status: transectStatus(t, station.surveyType),
                           flags: transectFlags(t),
+                          colonyResults: data.colonyResults[t.id],
                           onTap: () => _openTransect(station, t),
                           onLongPress: () => _deleteTransect(t),
                         ),
@@ -245,12 +255,20 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                   ),
                 ),
                 const SizedBox(height: 16),
-                // The station summary and CPCe export arrive with #8.
-                OutlinedButton.icon(
-                  onPressed: null,
-                  icon: const Icon(Icons.summarize_outlined),
-                  label: const Text('Station summary (coming with #8)'),
-                ),
+                // Issue #3: colony count has no station cover summary -- its
+                // results stay per transect (alignment doc §10).
+                if (!reportsBulletinCover(station.surveyType))
+                  Text(
+                    kColonyCountNoStationSummary,
+                    style: TextStyle(color: Colors.grey.shade700, fontSize: 13, height: 1.4),
+                  )
+                else
+                  // The station summary and CPCe export arrive with #8.
+                  OutlinedButton.icon(
+                    onPressed: null,
+                    icon: const Icon(Icons.summarize_outlined),
+                    label: const Text('Station summary (coming with #8)'),
+                  ),
               ],
             ),
           ),
@@ -298,6 +316,23 @@ class _StationCard extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(line, style: const TextStyle(fontSize: 13)),
             ),
+          // Issue #3: said on the station itself, not only in its reports.
+          if (!reportsBulletinCover(station.surveyType))
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.science_outlined, size: 16, color: AppColors.primary),
+                  const SizedBox(width: 6),
+                  const Expanded(
+                    child: Text(
+                      kResearchScopeNote,
+                      style: TextStyle(fontSize: 12, color: AppColors.primary),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           for (final flag in flags) ...[
             const SizedBox(height: 4),
             FlagLine(flag),
@@ -313,6 +348,7 @@ class _TransectRow extends StatelessWidget {
     required this.transect,
     required this.status,
     required this.flags,
+    this.colonyResults,
     required this.onTap,
     required this.onLongPress,
   });
@@ -320,6 +356,20 @@ class _TransectRow extends StatelessWidget {
   final TransectSession transect;
   final String status;
   final List<String> flags;
+
+  /// Issue #3: a colony-count transect's own counts; `null` otherwise.
+  final SessionSummary? colonyResults;
+
+  /// "N colonies · X% bleached (…)", Surveys' card wording -- or nothing
+  /// at all while a blinded recount is pending (sub-plan 14).
+  String? get _resultsLine {
+    final r = colonyResults;
+    if (r == null) return null;
+    if (transect.resultsCurrentlyHidden) return 'Results hidden — recount pending';
+    if (r.colonyCount == 0) return '0 colonies';
+    final prevalence = PrevalenceEstimate.of(bleached: r.bleachedCount, classified: r.classifiedCount);
+    return '${r.colonyCount} colonies · ${prevalence?.cardLabel ?? 'None classified'}';
+  }
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
@@ -356,6 +406,10 @@ class _TransectRow extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(detail, style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+              if (_resultsLine case final results?) ...[
+                const SizedBox(height: 4),
+                Text(results, style: const TextStyle(fontSize: 13)),
+              ],
               for (final flag in flags) ...[
                 const SizedBox(height: 4),
                 FlagLine(flag),

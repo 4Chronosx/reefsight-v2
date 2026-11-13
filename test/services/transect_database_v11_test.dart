@@ -577,6 +577,117 @@ void main() {
     });
   });
 
+  // Issue #3: colony count is a research mode, reported separately -- its
+  // transects never get bulletin frames or cover, so nothing can mix them
+  // into a station cover summary (alignment doc §10).
+  group('TransectDatabase colony-count transects (#3)', () {
+    late TransectDatabase db;
+    late int colony;
+
+    setUp(() async {
+      db = await TransectDatabase.openInMemoryForTest();
+      final station = await db.insertStation(_station(type: SurveyType.colonyCount, mode: null));
+      colony = await db.insertSession(
+        _transect(station, 1).copyWith(captureSource: CaptureSource.legacyColony),
+      );
+    });
+    tearDown(() => db.close());
+
+    test('take no cover rows', () async {
+      await expectLater(
+        db.replaceTransectCover(colony, [
+          TransectCoverRow(sessionId: colony, categoryCode: 'HC', points: 1, totalPoints: 10, percent: 10),
+        ]),
+        throwsArgumentError,
+      );
+      expect(await db.coverForSession(colony), isEmpty);
+    });
+
+    test('take no frames (so no points either)', () async {
+      await expectLater(db.insertFrame(_frame(colony, 0)), throwsArgumentError);
+      expect(await db.framesForSession(colony), isEmpty);
+    });
+
+    test('photo transects and station-less sessions still take frames and cover', () async {
+      final photo = await db.insertSession(_transect(await db.insertStation(_station(code: 'P1')), 1));
+      final quick = await db.insertSession(_transect(null, null));
+      for (final id in [photo, quick]) {
+        await db.insertFrame(_frame(id, 0));
+        await db.replaceTransectCover(id, [
+          TransectCoverRow(sessionId: id, categoryCode: 'HC', points: 1, totalPoints: 10, percent: 10),
+        ]);
+        expect(await db.coverForSession(id), hasLength(1));
+      }
+    });
+  });
+
+  // Issue #3: transects of one station are replicates, not repeat surveys,
+  // so the Executive tab never compares T2 with T1 of the same station.
+  group('TransectDatabase.previousSessionForSite with stations (#3)', () {
+    late TransectDatabase db;
+
+    setUp(() async => db = await TransectDatabase.openInMemoryForTest());
+    tearDown(() => db.close());
+
+    Future<int> ended(int? station, int? number, DateTime at) async {
+      final id = await db.insertSession(
+        _transect(station, number).copyWith(startedAt: at, siteName: 'Alegria MPA'),
+      );
+      await db.closeSession(id, at.add(const Duration(minutes: 40)));
+      return id;
+    }
+
+    test('skips earlier transects of the same station', () async {
+      final oct = await ended(null, null, DateTime.utc(2026, 10, 4, 2));
+      final station = await db.insertStation(_station(type: SurveyType.colonyCount, mode: null));
+      await ended(station, 1, DateTime.utc(2026, 11, 15, 2));
+      final t2At = DateTime.utc(2026, 11, 15, 3);
+      final t2 = await ended(station, 2, t2At);
+
+      final previous = await db.previousSessionForSite('Alegria MPA', before: t2At, excludingId: t2);
+
+      expect(previous?.session.id, oct);
+    });
+
+    // Review fix: a photo or preliminary transect has no colonies, so a
+    // colony transect compared with it would read "down from 0 colonies".
+    test('never compares with a photo or preliminary station transect', () async {
+      final photo = await db.insertStation(_station(code: 'P1'));
+      final quick = await ended(null, null, DateTime.utc(2026, 10, 1, 2));
+      await ended(photo, 1, DateTime.utc(2026, 10, 4, 2));
+      final colony = await db.insertStation(_station(code: 'C1', type: SurveyType.colonyCount, mode: null));
+      final at = DateTime.utc(2026, 11, 15, 2);
+      final current = await ended(colony, 1, at);
+
+      final previous = await db.previousSessionForSite('Alegria MPA', before: at, excludingId: current);
+
+      expect(previous?.session.id, quick);
+    });
+
+    test('still finds a transect of another station', () async {
+      final s1 = await db.insertStation(_station(code: 'S1', type: SurveyType.colonyCount, mode: null));
+      final s2 = await db.insertStation(_station(code: 'S2', type: SurveyType.colonyCount, mode: null));
+      final other = await ended(s1, 1, DateTime.utc(2026, 10, 4, 2));
+      final at = DateTime.utc(2026, 11, 15, 2);
+      final current = await ended(s2, 1, at);
+
+      final previous = await db.previousSessionForSite('Alegria MPA', before: at, excludingId: current);
+
+      expect(previous?.session.id, other);
+    });
+
+    test('a quick transect still compares with an earlier station transect', () async {
+      final station = await db.insertStation(_station(type: SurveyType.colonyCount, mode: null));
+      final t1 = await ended(station, 1, DateTime.utc(2026, 11, 15, 2));
+      final at = DateTime.utc(2026, 11, 15, 4);
+      final quick = await ended(null, null, at);
+
+      final previous = await db.previousSessionForSite('Alegria MPA', before: at, excludingId: quick);
+
+      expect(previous?.session.id, t1);
+    });
+  });
+
   group('TransectDatabase.deleteSession with v11 rows', () {
     test('removes the transect\'s frames, points and cover too', () async {
       final db = await TransectDatabase.openInMemoryForTest();

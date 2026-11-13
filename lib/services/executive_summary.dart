@@ -1,5 +1,7 @@
 import 'report_data.dart';
 import 'session_summary.dart';
+import 'station.dart';
+import 'station_checks.dart';
 import 'transect_metrics.dart';
 import 'transect_session.dart';
 
@@ -38,7 +40,7 @@ class ExecutiveSummary {
       comparison: _isEarlierSameSite(previous, session)
           ? SurveyComparison._between(estimate, previous!, currentFinished: finished)
           : null,
-      details: _details(session),
+      details: _details(session, report.station),
     );
   }
 
@@ -86,15 +88,27 @@ class ExecutiveSummary {
     final site = _normalizedSite(current.siteName);
     return site != null &&
         _normalizedSite(previous.session.siteName) == site &&
-        previous.session.startedAt.isBefore(current.startedAt);
+        previous.session.startedAt.isBefore(current.startedAt) &&
+        // Issue #3: another transect of the same station is a replicate of
+        // this survey, not an earlier one.
+        (current.stationId == null || previous.session.stationId != current.stationId);
   }
 
-  static List<(String, String)> _details(TransectSession session) {
+  static List<(String, String)> _details(TransectSession session, Station? station) {
     final local = session.startedAt.toLocal();
     final fix = session.entryFix;
     return [
       ('Date', '${formatShortDate(local)}, ${_twoDigits(local.hour)}:${_twoDigits(local.minute)}'),
       ('Site', _siteName(session) ?? 'Not recorded'),
+      if (station != null) ...[
+        ('Station', stationTransectLabel(station, session)),
+        (
+          'Survey',
+          reportsBulletinCover(station.surveyType)
+              ? surveyTypeLabel(station.surveyType)
+              : kResearchScopeNote,
+        ),
+      ],
       ('Observer', _trimmedOrNull(session.observerName) ?? 'Not recorded'),
       ('Tape length', formatTapeLength(session.tapeLengthMeters)),
       if (fix != null)

@@ -1,5 +1,6 @@
 import 'health_aggregator.dart';
 import 'recount_comparison.dart';
+import 'station.dart';
 import 'tracked_colony_record.dart';
 import 'transect_metrics.dart';
 import 'transect_metrics.dart' as metrics show densityInterval;
@@ -12,10 +13,15 @@ import 'transect_session.dart';
 /// plus health-label counting, not new domain logic, so it stays testable
 /// without a widget tree or a database.
 class TransectReport {
-  TransectReport({required this.session, required this.colonies});
+  TransectReport({required this.session, required this.colonies, this.station});
 
   final TransectSession session;
   final List<TrackedColonyRecord> colonies;
+
+  /// Issue #3: the station a colony-count transect belongs to, for the
+  /// report's station line and export columns. `null` for a quick
+  /// (station-less) transect, or when the station couldn't be read.
+  final Station? station;
 
   int get totalColonies => colonies.length;
 
