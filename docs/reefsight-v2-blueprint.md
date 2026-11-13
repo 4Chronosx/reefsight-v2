@@ -128,7 +128,7 @@ transect was analyzed.
 
 ## 3. Database: entity relationships (schema v11)
 
-One station has many transects (the existing `sessions` table). Each transect has many frames, each
+One station has many transects (the existing `transect_sessions` table, called SESSIONS in the diagram). Each transect has many frames, each
 frame has 10 points, and cover results are cached per transect and category. Old sessions keep
 `station_id` empty and keep working.
 
@@ -230,13 +230,14 @@ A 75 × 25 m station (TB 2019-04). Survey type and frame mode are fixed here, so
 | depth_min_m / depth_max_m | REAL | Flag if the max is over 6 m |
 | deep_edge_lat / deep_edge_lon | REAL | Surface GPS fix of the deeper edge |
 | deep_edge_accuracy_m | REAL | Fix accuracy |
-| deep_edge_fixed_at | TEXT | ISO timestamp |
+| deep_edge_at | TEXT | ISO timestamp of the fix |
+| deep_edge_source | TEXT | `gps` · `manual` (stored with `GeoFix.toColumns`, like the transect entry/exit fixes) |
 | marker_placed | INTEGER | Concrete block placed (0/1) |
 | observer_name | TEXT | Lead observer |
 | notes | TEXT | Free text |
 | created_at | TEXT NOT NULL | ISO timestamp |
 
-### `sessions` (changed)
+### `transect_sessions` (changed)
 The existing table: each session becomes one transect. All current columns stay; new columns are
 nullable, so old surveys keep working.
 
@@ -261,7 +262,7 @@ One row per scored image: a photo-transect still (one per meter) or a sampled vi
 | Column | Type | Meaning |
 |---|---|---|
 | id | INTEGER PK | Autoincrement |
-| session_id | INTEGER FK NOT NULL | `sessions.id` |
+| session_id | INTEGER FK NOT NULL | `transect_sessions.id` |
 | meter_mark | REAL | 0–50 for photo transects; unique per session |
 | video_time_ms | INTEGER | Preliminary frames |
 | image_path | TEXT NOT NULL | Copy in app storage |
@@ -313,7 +314,7 @@ calculated from these rows, not stored.
 
 | Column | Type | Meaning |
 |---|---|---|
-| session_id | INTEGER PK FK | `sessions.id` |
+| session_id | INTEGER PK FK | `transect_sessions.id` |
 | category_code | TEXT PK | A TB code or a major category |
 | points | INTEGER NOT NULL | Points in this category |
 | total_points | INTEGER NOT NULL | Points counted, after exclusions |
@@ -328,7 +329,7 @@ transect) and per station (distinct TAUs across all transects). The station figu
 |---|---|---|
 | id | INTEGER PK | Autoincrement |
 | station_id | INTEGER FK NOT NULL | `stations.id` |
-| session_id | INTEGER FK NOT NULL | `sessions.id`, for the per-transect count |
+| session_id | INTEGER FK NOT NULL | `transect_sessions.id`, for the per-transect count |
 | frame_id | INTEGER FK | Photo the tag is on |
 | tau_code | TEXT NOT NULL | e.g. PORM, ACB, HEL (TB 2019-04 Table 3) |
 | tagged_by / tagged_at | TEXT | Who tagged it, and when |
@@ -346,6 +347,16 @@ Only needed for the in-app Google Drive upload, which is deferred. Sharing uses 
 Follows the app's existing pattern: new tables plus nullable `ALTER TABLE … ADD COLUMN`, so existing
 rows read back as NULL and old surveys open unchanged.
 
+**Implemented in #1** (`lib/services/transect_database.dart`; walkthrough in
+`sub-plans/20-schema-v11-stations.md`). Changes from the first draft of this section:
+- **Table name.** The existing table is `transect_sessions`, not `sessions`.
+- **Deep-edge columns.** The fix uses `GeoFix.toColumns('deep_edge')`, so the columns are
+  `deep_edge_at` and `deep_edge_source` (`gps` · `manual`), not `deep_edge_fixed_at`.
+- **Deleting a transect.** `deleteSession` removes its points, frames and cover first. Foreign keys
+  are on and nothing cascades.
+- **CHECK lists can't be changed later.** SQLite can't edit a CHECK in place, so a new survey type
+  or frame mode needs a table rebuild in its own migration.
+
 ```sql
 -- if (oldVersion < 11)
 CREATE TABLE stations (
@@ -357,30 +368,30 @@ CREATE TABLE stations (
   surveyed_on TEXT NOT NULL,
   site_name TEXT, reef_zone TEXT,
   depth_min_m REAL, depth_max_m REAL,
-  deep_edge_lat REAL, deep_edge_lon REAL, deep_edge_accuracy_m REAL, deep_edge_fixed_at TEXT,
+  deep_edge_lat REAL, deep_edge_lon REAL, deep_edge_accuracy_m REAL, deep_edge_at TEXT, deep_edge_source TEXT,
   marker_placed INTEGER, observer_name TEXT, notes TEXT,
   created_at TEXT NOT NULL
 );
 
-ALTER TABLE sessions ADD COLUMN station_id INTEGER REFERENCES stations(id);
-ALTER TABLE sessions ADD COLUMN transect_number INTEGER;
-ALTER TABLE sessions ADD COLUMN capture_source TEXT;
-ALTER TABLE sessions ADD COLUMN depth_start_m REAL;
-ALTER TABLE sessions ADD COLUMN depth_end_m REAL;
-ALTER TABLE sessions ADD COLUMN random_along_m REAL;
-ALTER TABLE sessions ADD COLUMN random_swimout_m REAL;
-ALTER TABLE sessions ADD COLUMN points_per_frame INTEGER;
-ALTER TABLE sessions ADD COLUMN point_seed INTEGER;
-ALTER TABLE sessions ADD COLUMN analysis_status TEXT;
-ALTER TABLE sessions ADD COLUMN analyzed_at TEXT;
-ALTER TABLE sessions ADD COLUMN model_id TEXT;
-ALTER TABLE sessions ADD COLUMN analyzed_on TEXT;
+ALTER TABLE transect_sessions ADD COLUMN station_id INTEGER REFERENCES stations(id);
+ALTER TABLE transect_sessions ADD COLUMN transect_number INTEGER;
+ALTER TABLE transect_sessions ADD COLUMN capture_source TEXT;
+ALTER TABLE transect_sessions ADD COLUMN depth_start_m REAL;
+ALTER TABLE transect_sessions ADD COLUMN depth_end_m REAL;
+ALTER TABLE transect_sessions ADD COLUMN random_along_m REAL;
+ALTER TABLE transect_sessions ADD COLUMN random_swimout_m REAL;
+ALTER TABLE transect_sessions ADD COLUMN points_per_frame INTEGER;
+ALTER TABLE transect_sessions ADD COLUMN point_seed INTEGER;
+ALTER TABLE transect_sessions ADD COLUMN analysis_status TEXT;
+ALTER TABLE transect_sessions ADD COLUMN analyzed_at TEXT;
+ALTER TABLE transect_sessions ADD COLUMN model_id TEXT;
+ALTER TABLE transect_sessions ADD COLUMN analyzed_on TEXT;
 CREATE UNIQUE INDEX idx_sessions_station_transect
-  ON sessions(station_id, transect_number) WHERE station_id IS NOT NULL;
+  ON transect_sessions(station_id, transect_number) WHERE station_id IS NOT NULL;
 
 CREATE TABLE transect_frames (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL REFERENCES sessions(id),
+  session_id INTEGER NOT NULL REFERENCES transect_sessions(id),
   meter_mark REAL, video_time_ms INTEGER,
   image_path TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('in_app','imported','video_frame')),
@@ -410,7 +421,7 @@ CREATE TABLE category_map (
 );
 
 CREATE TABLE transect_cover (
-  session_id INTEGER NOT NULL REFERENCES sessions(id),
+  session_id INTEGER NOT NULL REFERENCES transect_sessions(id),
   category_code TEXT NOT NULL,
   points INTEGER NOT NULL, total_points INTEGER NOT NULL, percent REAL NOT NULL,
   uses_expert INTEGER NOT NULL DEFAULT 0,

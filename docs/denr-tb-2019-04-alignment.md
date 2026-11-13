@@ -354,6 +354,10 @@ of its own, for **both survey types**.
 - **Timing:** this needs a database change (a stations table, with each transect linked to a
   station), so not before November 15. On that dive, record the station ID and transect number on the
   slate and in the site field, so the transects can be linked afterwards.
+- **Status (November 14, 2026):** the database part is built (schema v11, issue #1, written up in
+  `mobile/sub-plans/20-schema-v11-stations.md`). The station screens come next (#2), and the summary
+  and export after that (#8). The station's deeper-edge GPS fix is stored the same way as the transect
+  entry and exit fixes, so it records whether the fix came from GPS or was typed in.
 
 ## 9. Proposed feature: importing photo-transect photos
 

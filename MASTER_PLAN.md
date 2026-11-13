@@ -57,6 +57,13 @@ any non-trivial architecture decision.
    re-tune the pedestrian-default thresholds for coral at 8 Hz, and add a minimum-track-length filter
    before counting. It produces the MOTA/MOTP/IDF1 numbers the Specification's Phase E requires.
 
+**DENR-aligned version** (GitHub issues #1–#19, milestones M1–M5; design in
+`docs/reefsight-v2-blueprint.md`):
+- **#1 Schema v11 and data layer** (`sub-plans/20-schema-v11-stations.md`): **done 2026-11-14.**
+  Adds stations, transect frames, frame points, the category map and transect cover, plus the
+  station and transect columns on `transect_sessions`.
+- **Next: #2**, the station and transect setup screens.
+
 ## Explicitly out of scope for now
 
 - Cordova-specific classifier fine-tuning (blocked on field annotations, deferred to "next week" per

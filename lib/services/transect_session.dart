@@ -1,8 +1,45 @@
 import 'classification_policy.dart';
 import 'crop_geometry.dart';
+import 'db_enum.dart';
 import 'device_checks.dart';
 import 'geo_fix.dart';
 import 'recount.dart';
+
+/// Schema v11 (issue #1): how a station transect's frames were captured.
+/// `legacyColony` is a colony-count transect (#3).
+enum CaptureSource with DbEnum {
+  inAppPhotos('in_app_photos'),
+  importedPhotos('imported_photos'),
+  inAppVideo('in_app_video'),
+  legacyColony('legacy_colony');
+
+  const CaptureSource(this.db);
+  @override
+  final String db;
+}
+
+/// Schema v11: where a transect's cover analysis stands.
+enum AnalysisStatus with DbEnum {
+  pending('pending'),
+  running('running'),
+  done('done'),
+  failed('failed');
+
+  const AnalysisStatus(this.db);
+  @override
+  final String db;
+}
+
+/// Schema v11: where the cover segmenter ran -- a laptop now (#7), the phone
+/// once the Core ML bridge lands (#12).
+enum AnalyzedOn with DbEnum {
+  phone('phone'),
+  laptop('laptop');
+
+  const AnalyzedOn(this.db);
+  @override
+  final String db;
+}
 
 /// One transect run: identity plus the physical tape length that serves as
 /// the density denominator.
@@ -39,6 +76,19 @@ class TransectSession {
     this.recount,
     this.cropStyle,
     this.thresholds,
+    this.stationId,
+    this.transectNumber,
+    this.captureSource,
+    this.depthStartM,
+    this.depthEndM,
+    this.randomAlongM,
+    this.randomSwimoutM,
+    this.pointsPerFrame,
+    this.pointSeed,
+    this.analysisStatus,
+    this.analyzedAt,
+    this.modelId,
+    this.analyzedOn,
   });
 
   /// `null` before the row has been inserted and assigned a rowid.
@@ -126,6 +176,33 @@ class TransectSession {
   final CropStyle? cropStyle;
   final ClassificationThresholds? thresholds;
 
+  /// Schema v11 (issue #1): the station this transect belongs to, and its
+  /// number there (1-5, unique per station). Both `null` on every survey
+  /// recorded before v11 -- those stay standalone and keep working.
+  final int? stationId;
+  final int? transectNumber;
+  final CaptureSource? captureSource;
+
+  /// Depth at each end of the tape.
+  final double? depthStartM;
+  final double? depthEndM;
+
+  /// TB 2019-04's random placement: distance along the station's 75 m axis
+  /// and the 0-25 m swim-out.
+  final double? randomAlongM;
+  final double? randomSwimoutM;
+
+  /// Scoring points per frame (10, as in CPCe) and the seed that places
+  /// them, so the same points can be regenerated.
+  final int? pointsPerFrame;
+  final int? pointSeed;
+
+  /// Cover analysis state, and the model that produced it.
+  final AnalysisStatus? analysisStatus;
+  final DateTime? analyzedAt;
+  final String? modelId;
+  final AnalyzedOn? analyzedOn;
+
   /// Whether the app's numbers must stay off screen right now.
   bool get resultsCurrentlyHidden => resultsHidden && resultsRevealedAt == null;
 
@@ -152,6 +229,19 @@ class TransectSession {
     Recount? recount,
     CropStyle? cropStyle,
     ClassificationThresholds? thresholds,
+    int? stationId,
+    int? transectNumber,
+    CaptureSource? captureSource,
+    double? depthStartM,
+    double? depthEndM,
+    double? randomAlongM,
+    double? randomSwimoutM,
+    int? pointsPerFrame,
+    int? pointSeed,
+    AnalysisStatus? analysisStatus,
+    DateTime? analyzedAt,
+    String? modelId,
+    AnalyzedOn? analyzedOn,
   }) {
     return TransectSession(
       id: id ?? this.id,
@@ -176,6 +266,19 @@ class TransectSession {
       recount: recount ?? this.recount,
       cropStyle: cropStyle ?? this.cropStyle,
       thresholds: thresholds ?? this.thresholds,
+      stationId: stationId ?? this.stationId,
+      transectNumber: transectNumber ?? this.transectNumber,
+      captureSource: captureSource ?? this.captureSource,
+      depthStartM: depthStartM ?? this.depthStartM,
+      depthEndM: depthEndM ?? this.depthEndM,
+      randomAlongM: randomAlongM ?? this.randomAlongM,
+      randomSwimoutM: randomSwimoutM ?? this.randomSwimoutM,
+      pointsPerFrame: pointsPerFrame ?? this.pointsPerFrame,
+      pointSeed: pointSeed ?? this.pointSeed,
+      analysisStatus: analysisStatus ?? this.analysisStatus,
+      analyzedAt: analyzedAt ?? this.analyzedAt,
+      modelId: modelId ?? this.modelId,
+      analyzedOn: analyzedOn ?? this.analyzedOn,
     );
   }
 
@@ -204,6 +307,19 @@ class TransectSession {
         ...Recount.toColumns(recount),
         'crop_style': cropStyle?.name,
         ...thresholds?.toColumns() ?? ClassificationThresholds.nullColumns,
+        'station_id': stationId,
+        'transect_number': transectNumber,
+        'capture_source': captureSource?.db,
+        'depth_start_m': depthStartM,
+        'depth_end_m': depthEndM,
+        'random_along_m': randomAlongM,
+        'random_swimout_m': randomSwimoutM,
+        'points_per_frame': pointsPerFrame,
+        'point_seed': pointSeed,
+        'analysis_status': analysisStatus?.db,
+        'analyzed_at': analyzedAt?.toIso8601String(),
+        'model_id': modelId,
+        'analyzed_on': analyzedOn?.db,
       };
 
   static DateTime? _parseNullable(Object? raw) =>
@@ -234,6 +350,19 @@ class TransectSession {
       recount: Recount.fromColumns(map),
       cropStyle: CropStyle.values.asNameMap()[map['crop_style']],
       thresholds: ClassificationThresholds.fromColumns(map),
+      stationId: map['station_id'] as int?,
+      transectNumber: map['transect_number'] as int?,
+      captureSource: enumFromDb(CaptureSource.values, map['capture_source']),
+      depthStartM: (map['depth_start_m'] as num?)?.toDouble(),
+      depthEndM: (map['depth_end_m'] as num?)?.toDouble(),
+      randomAlongM: (map['random_along_m'] as num?)?.toDouble(),
+      randomSwimoutM: (map['random_swimout_m'] as num?)?.toDouble(),
+      pointsPerFrame: map['points_per_frame'] as int?,
+      pointSeed: map['point_seed'] as int?,
+      analysisStatus: enumFromDb(AnalysisStatus.values, map['analysis_status']),
+      analyzedAt: _parseNullable(map['analyzed_at']),
+      modelId: map['model_id'] as String?,
+      analyzedOn: enumFromDb(AnalyzedOn.values, map['analyzed_on']),
     );
   }
 }

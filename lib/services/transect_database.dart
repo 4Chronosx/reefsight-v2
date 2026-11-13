@@ -1,11 +1,16 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import 'category_mapping.dart';
 import 'device_checks.dart';
+import 'frame_point.dart';
 import 'geo_fix.dart';
 import 'health_aggregator.dart';
 import 'session_summary.dart';
+import 'station.dart';
 import 'tracked_colony_record.dart';
+import 'transect_cover.dart';
+import 'transect_frame.dart';
 import 'transect_session.dart';
 
 /// On-device SQLite persistence (`sqflite`, locked by
@@ -25,6 +30,13 @@ class TransectDatabase {
   static const _sessionsTable = 'transect_sessions';
   static const _coloniesTable = 'tracked_colonies';
 
+  // Schema v11 (issue #1, `docs/reefsight-v2-blueprint.md` §3-5).
+  static const _stationsTable = 'stations';
+  static const _framesTable = 'transect_frames';
+  static const _pointsTable = 'frame_points';
+  static const _categoryMapTable = 'category_map';
+  static const _coverTable = 'transect_cover';
+
   /// Bumped from 1 -> 2 when `site_name`/`observer_name` were added to
   /// `transect_sessions` (sub-plan 5, task 2), and 2 -> 3 when `video_path`
   /// was added (transect video export/share) -- `onCreate` only runs for a
@@ -39,7 +51,10 @@ class TransectDatabase {
   /// `video_started_at` (sub-plan 16: colony video jump). 8 -> 9 added the
   /// colony photo columns to `tracked_colonies` (sub-plan 18). 9 -> 10
   /// added the session's classifier settings (crop style + thresholds).
-  static const _schemaVersion = 10;
+  /// 10 -> 11 added stations, transect frames, frame points, the category
+  /// map and cached transect cover, plus the station/transect columns on
+  /// `transect_sessions` (issue #1, the DENR TB 2019-04 version).
+  static const _schemaVersion = 11;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -82,6 +97,8 @@ class TransectDatabase {
   }
 
   static Future<void> _createSchema(Database db) async {
+    // Before `transect_sessions`, which references it.
+    await db.execute(_stationsTableSql);
     await db.execute('''
       CREATE TABLE $_sessionsTable (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,7 +119,8 @@ class TransectDatabase {
         ${_fixColumnsSql('entry')},
         ${_fixColumnsSql('exit')},
         ${_recountColumns.join(',\n        ')},
-        ${_settingsColumns.join(',\n        ')}
+        ${_settingsColumns.join(',\n        ')},
+        ${_stationSessionColumns.join(',\n        ')}
       )
     ''');
     await db.execute('''
@@ -122,6 +140,10 @@ class TransectDatabase {
         UNIQUE(session_id, track_id)
       )
     ''');
+    for (final sql in _v11ChildTablesSql) {
+      await db.execute(sql);
+    }
+    await db.execute(_stationTransectIndexSql);
   }
 
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
@@ -182,7 +204,139 @@ class TransectDatabase {
         await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN $column');
       }
     }
+    if (oldVersion < 11) {
+      await db.execute(_stationsTableSql);
+      for (final column in _stationSessionColumns) {
+        await db.execute('ALTER TABLE $_sessionsTable ADD COLUMN $column');
+      }
+      for (final sql in _v11ChildTablesSql) {
+        await db.execute(sql);
+      }
+      await db.execute(_stationTransectIndexSql);
+    }
   }
+
+  /// v11: a station (TB 2019-04) groups 3-5 transects. The CHECK lists are
+  /// frozen on disk -- SQLite can't alter a CHECK in place, so a new survey
+  /// type or frame mode needs a table rebuild in its own migration, not just
+  /// a new Dart enum value. The deep-edge fix uses `GeoFix.toColumns`'s five
+  /// columns (prefix `deep_edge`), like the transect entry/exit fixes.
+  static final _stationsTableSql = '''
+    CREATE TABLE $_stationsTable (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL,
+      name TEXT,
+      survey_type TEXT NOT NULL
+        CHECK (survey_type IN ('photo_transect', 'preliminary_video', 'colony_count')),
+      frame_mode TEXT CHECK (frame_mode IN ('physical', 'virtual', 'imported_mixed')),
+      surveyed_on TEXT NOT NULL,
+      site_name TEXT,
+      reef_zone TEXT,
+      depth_min_m REAL,
+      depth_max_m REAL,
+      ${_fixColumnsSql(Station.deepEdgePrefix)},
+      marker_placed INTEGER,
+      observer_name TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL
+    )
+  ''';
+
+  /// v11's `transect_sessions` columns -- names match `TransectSession.toMap`.
+  /// All nullable, so every survey from before v11 reads back with them
+  /// `null` and stays a standalone (station-less) survey. `REFERENCES` on an
+  /// added column is allowed because its default is NULL.
+  static const _stationSessionColumns = [
+    'station_id INTEGER REFERENCES $_stationsTable(id)',
+    'transect_number INTEGER',
+    'capture_source TEXT',
+    'depth_start_m REAL',
+    'depth_end_m REAL',
+    'random_along_m REAL',
+    'random_swimout_m REAL',
+    'points_per_frame INTEGER',
+    'point_seed INTEGER',
+    'analysis_status TEXT',
+    'analyzed_at TEXT',
+    'model_id TEXT',
+    'analyzed_on TEXT',
+  ];
+
+  /// A transect number is unique within its station. Partial, so the
+  /// standalone surveys (`station_id IS NULL`) are never constrained.
+  static const _stationTransectIndexSql = '''
+    CREATE UNIQUE INDEX idx_sessions_station_transect
+      ON $_sessionsTable(station_id, transect_number) WHERE station_id IS NOT NULL
+  ''';
+
+  /// v11's tables that hang off a transect, in dependency order. `genus_tags`
+  /// comes with #10 and `drive_uploads` is deferred with the in-app Drive
+  /// upload, so neither is here. No `ON DELETE CASCADE` (matching
+  /// `tracked_colonies`): [deleteSession] removes the children explicitly.
+  static const _v11ChildTablesSql = [
+    '''
+    CREATE TABLE $_framesTable (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES $_sessionsTable(id),
+      meter_mark REAL,
+      video_time_ms INTEGER,
+      image_path TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('in_app', 'imported', 'video_frame')),
+      width_px INTEGER,
+      height_px INTEGER,
+      camera_make TEXT,
+      camera_model TEXT,
+      captured_at TEXT,
+      corners_json TEXT,
+      corner_source TEXT,
+      tilt_deg REAL,
+      distance_m REAL,
+      distance_method TEXT,
+      checks_passed INTEGER,
+      fisheye_flag INTEGER,
+      excluded INTEGER NOT NULL DEFAULT 0,
+      exclude_reason TEXT,
+      UNIQUE (session_id, meter_mark)
+    )
+    ''',
+    '''
+    CREATE TABLE $_pointsTable (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      frame_id INTEGER NOT NULL REFERENCES $_framesTable(id),
+      point_index INTEGER NOT NULL,
+      x_norm REAL NOT NULL,
+      y_norm REAL NOT NULL,
+      model_class TEXT,
+      model_confidence REAL,
+      category_code TEXT,
+      expert_category_code TEXT,
+      expert_name TEXT,
+      reviewed_at TEXT,
+      UNIQUE (frame_id, point_index)
+    )
+    ''',
+    '''
+    CREATE TABLE $_categoryMapTable (
+      model_id TEXT NOT NULL,
+      model_class TEXT NOT NULL,
+      category_code TEXT NOT NULL,
+      major_category TEXT NOT NULL,
+      excluded INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (model_id, model_class)
+    )
+    ''',
+    '''
+    CREATE TABLE $_coverTable (
+      session_id INTEGER NOT NULL REFERENCES $_sessionsTable(id),
+      category_code TEXT NOT NULL,
+      points INTEGER NOT NULL,
+      total_points INTEGER NOT NULL,
+      percent REAL NOT NULL,
+      uses_expert INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (session_id, category_code)
+    )
+    ''',
+  ];
 
   /// v10: the classifier settings a session ran with -- names match
   /// `TransectSession.toMap` and `ClassificationThresholds.toColumns`.
@@ -228,7 +382,13 @@ class TransectDatabase {
 
   static String _fixColumnsSql(String prefix) => _fixColumns(prefix).join(',\n        ');
 
+  /// A station transect must carry its number: the partial unique index
+  /// treats NULLs as distinct, so a numberless one would slip past it and
+  /// past [nextTransectNumber].
   Future<int> insertSession(TransectSession session) async {
+    if (session.stationId != null && session.transectNumber == null) {
+      throw ArgumentError('A station transect needs a transectNumber');
+    }
     final map = session.toMap()..remove('id');
     return _db.insert(_sessionsTable, map);
   }
@@ -404,9 +564,11 @@ class TransectDatabase {
     return changed == 1;
   }
 
-  /// Deletes a survey from this phone: its colony rows, then the session row,
-  /// in one transaction (`tracked_colonies.session_id` has no `ON DELETE
-  /// CASCADE`, and foreign keys are on). Returns the deleted session, so
+  /// Deletes a survey from this phone: its frame points, frames, cached
+  /// cover and colony rows, then the session row, in one transaction (none
+  /// of the child tables has `ON DELETE CASCADE`, and foreign keys are on --
+  /// leaving any child row behind makes the session delete fail). The
+  /// station, if any, stays: it is the diver's to delete. Returns the deleted session, so
   /// the caller can remove its files (`session_files.dart`), or `null` if
   /// there was no such session. `AUTOINCREMENT` never reuses the id, so a
   /// later survey can't inherit the deleted one's `session<id>_*` files.
@@ -421,6 +583,12 @@ class TransectDatabase {
           whereArgs: [sessionId],
         );
         if (rows.isEmpty) return null;
+        await txn.rawDelete('''
+          DELETE FROM $_pointsTable
+          WHERE frame_id IN (SELECT id FROM $_framesTable WHERE session_id = ?)
+        ''', [sessionId]);
+        await txn.delete(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]);
+        await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
         await txn.delete(_coloniesTable, where: 'session_id = ?', whereArgs: [sessionId]);
         await txn.delete(_sessionsTable, where: 'id = ?', whereArgs: [sessionId]);
         return TransectSession.fromMap(rows.single);
@@ -508,6 +676,286 @@ class TransectDatabase {
           ),
         )
         .toList(growable: false);
+  }
+
+  // ---------------------------------------------------------------------
+  // Schema v11 (issue #1): stations, transect frames, points, category map
+  // and cover. Screens arrive in #2 onwards; cover computation in #6.
+  // ---------------------------------------------------------------------
+
+  /// A blank code, or a frame mode that doesn't fit the survey type (photo
+  /// transects need one; preliminary and colony count must not have one),
+  /// is the caller's bug, not a field condition -- thrown, like
+  /// [recordRecount]'s checks.
+  static Map<String, Object?> _stationRow(Station station) {
+    if (station.code.trim().isEmpty) throw ArgumentError('Station code is required');
+    if (station.needsFrameMode && station.frameMode == null) {
+      throw ArgumentError('A photo-transect station needs a frame mode');
+    }
+    if (!station.needsFrameMode && station.frameMode != null) {
+      throw ArgumentError('Only photo-transect stations have a frame mode');
+    }
+    return station.toMap()
+      ..remove('id')
+      ..['code'] = station.code.trim();
+  }
+
+  /// `async` so a bad station fails the returned future rather than
+  /// throwing before there is one.
+  Future<int> insertStation(Station station) async =>
+      _db.insert(_stationsTable, _stationRow(station));
+
+  /// Rewrites every column of the station's row. Survey type and frame mode
+  /// are rewritten too: blocking that once a station has transects is for
+  /// the setup screens (#2) to decide, with the diver in front of them.
+  Future<void> updateStation(Station station) async {
+    final id = station.id;
+    if (id == null) throw ArgumentError('updateStation needs a stored station (id is null)');
+    await _db.update(_stationsTable, _stationRow(station), where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<Station?> stationById(int stationId) async {
+    final rows = await _db.query(_stationsTable, where: 'id = ?', whereArgs: [stationId]);
+    if (rows.isEmpty) return null;
+    return Station.fromMap(rows.single);
+  }
+
+  /// Every station, newest created first, each with its transect count --
+  /// one `LEFT JOIN ... GROUP BY`, like [listSessions].
+  Future<List<StationSummary>> listStations() async {
+    final rows = await _db.rawQuery('''
+      SELECT st.*, COUNT(s.id) AS transect_count
+      FROM $_stationsTable st
+      LEFT JOIN $_sessionsTable s ON s.station_id = st.id
+      GROUP BY st.id
+      ORDER BY st.created_at DESC, st.id DESC
+    ''');
+    return rows
+        .map(
+          (row) => StationSummary(
+            station: Station.fromMap(row),
+            transectCount: (row['transect_count'] as num?)?.toInt() ?? 0,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  /// A station's transects, by transect number.
+  Future<List<TransectSession>> transectsForStation(int stationId) async {
+    final rows = await _db.query(
+      _sessionsTable,
+      where: 'station_id = ?',
+      whereArgs: [stationId],
+      orderBy: 'transect_number, id',
+    );
+    return rows.map(TransectSession.fromMap).toList(growable: false);
+  }
+
+  /// One past the station's highest transect number (1 for a new station).
+  /// Not a gap-filler: after deleting transect 2 of 1-3 it still says 4, so
+  /// numbers already on a datasheet are never reused. The 3-5 limit is the
+  /// setup screen's (#2) to enforce.
+  Future<int> nextTransectNumber(int stationId) async {
+    final rows = await _db.rawQuery(
+      'SELECT MAX(transect_number) AS n FROM $_sessionsTable WHERE station_id = ?',
+      [stationId],
+    );
+    return ((rows.single['n'] as num?)?.toInt() ?? 0) + 1;
+  }
+
+  /// Moves a transect's cover analysis to [status]. [modelId], [analyzedOn]
+  /// and [at] (stored as `analyzed_at`) are written only when given, so
+  /// re-queueing a finished transect as `pending` keeps the record of the
+  /// last run until a new one replaces it.
+  Future<void> setAnalysisStatus(
+    int sessionId,
+    AnalysisStatus status, {
+    String? modelId,
+    AnalyzedOn? analyzedOn,
+    DateTime? at,
+  }) async {
+    await _db.update(
+      _sessionsTable,
+      {
+        'analysis_status': status.db,
+        'model_id': ?modelId,
+        'analyzed_on': ?analyzedOn?.db,
+        'analyzed_at': ?at?.toUtc().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [sessionId],
+    );
+  }
+
+  /// Throws a [DatabaseException] for a second frame at the same meter mark
+  /// of the same transect (`UNIQUE (session_id, meter_mark)`). Video frames
+  /// have no meter mark, and NULLs never collide in SQLite.
+  Future<int> insertFrame(TransectFrame frame) =>
+      _db.insert(_framesTable, frame.toMap()..remove('id'));
+
+  /// Along the tape: by meter mark, then video time for preliminary frames.
+  Future<List<TransectFrame>> framesForSession(int sessionId) async {
+    final rows = await _db.query(
+      _framesTable,
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'meter_mark, video_time_ms, id',
+    );
+    return rows.map(TransectFrame.fromMap).toList(growable: false);
+  }
+
+  Future<void> updateFrameCorners(int frameId, List<NormPoint> corners, CornerSource source) async {
+    if (corners.length != 4) {
+      throw ArgumentError.value(corners.length, 'corners', 'A frame needs exactly 4 corners');
+    }
+    await _db.update(
+      _framesTable,
+      {'corners_json': TransectFrame.cornersToJson(corners), 'corner_source': source.db},
+      where: 'id = ?',
+      whereArgs: [frameId],
+    );
+  }
+
+  /// Drops a frame from scoring, or brings it back. Bringing it back clears
+  /// the reason.
+  Future<void> setFrameExcluded(int frameId, {required bool excluded, String? reason}) async {
+    await _db.update(
+      _framesTable,
+      {'excluded': excluded ? 1 : 0, 'exclude_reason': excluded ? reason : null},
+      where: 'id = ?',
+      whereArgs: [frameId],
+    );
+  }
+
+  /// Inserts a frame's scoring points in one transaction: all or nothing,
+  /// so a duplicate `(frame_id, point_index)` leaves the frame as it was.
+  Future<void> insertFramePoints(List<FramePoint> points) async {
+    if (points.isEmpty) return;
+    await _db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final point in points) {
+        batch.insert(_pointsTable, point.toMap()..remove('id'));
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<List<FramePoint>> pointsForFrame(int frameId) async {
+    final rows = await _db.query(
+      _pointsTable,
+      where: 'frame_id = ?',
+      whereArgs: [frameId],
+      orderBy: 'point_index',
+    );
+    return rows.map(FramePoint.fromMap).toList(growable: false);
+  }
+
+  /// Every point of every frame of a transect, in [framesForSession]'s frame
+  /// order -- what the cover calculation (#6) reads. Includes excluded
+  /// frames' points; the caller drops them with the frame list.
+  Future<List<FramePoint>> pointsForSession(int sessionId) async {
+    final rows = await _db.rawQuery('''
+      SELECT p.*
+      FROM $_pointsTable p
+      JOIN $_framesTable f ON f.id = p.frame_id
+      WHERE f.session_id = ?
+      ORDER BY f.meter_mark, f.video_time_ms, f.id, p.point_index
+    ''', [sessionId]);
+    return rows.map(FramePoint.fromMap).toList(growable: false);
+  }
+
+  /// Stores the model's answer at a point (#6, #7, #12). Overwrites -- a
+  /// re-run of the analysis replaces the previous model's label -- but never
+  /// touches the expert columns.
+  Future<void> setPointModelLabel(
+    int pointId, {
+    required String? modelClass,
+    double? confidence,
+    String? categoryCode,
+  }) async {
+    await _db.update(
+      _pointsTable,
+      {'model_class': modelClass, 'model_confidence': confidence, 'category_code': categoryCode},
+      where: 'id = ?',
+      whereArgs: [pointId],
+    );
+  }
+
+  /// A reviewer's correction (#10). The model's label stays as it was, so
+  /// the disagreement is kept for validation (#16) and retraining.
+  Future<void> setExpertCategory(
+    int pointId,
+    String categoryCode, {
+    required String by,
+    required DateTime at,
+  }) async {
+    final code = categoryCode.trim();
+    final reviewer = by.trim();
+    if (code.isEmpty) throw ArgumentError('categoryCode is required');
+    if (reviewer.isEmpty) throw ArgumentError('A reviewer name is required');
+    await _db.update(
+      _pointsTable,
+      {
+        'expert_category_code': code,
+        'expert_name': reviewer,
+        'reviewed_at': at.toUtc().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [pointId],
+    );
+  }
+
+  /// Inserts or replaces mappings by `(model_id, model_class)`, in one
+  /// transaction. Seeding the CoralscapesV2 mapping is #6.
+  Future<void> upsertCategoryMappings(List<CategoryMapping> mappings) async {
+    if (mappings.isEmpty) return;
+    await _db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final mapping in mappings) {
+        batch.insert(_categoryMapTable, mapping.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// One model's mapping, by class name. Empty for a model with none yet.
+  Future<List<CategoryMapping>> categoryMapFor(String modelId) async {
+    final rows = await _db.query(
+      _categoryMapTable,
+      where: 'model_id = ?',
+      whereArgs: [modelId],
+      orderBy: 'model_class',
+    );
+    return rows.map(CategoryMapping.fromMap).toList(growable: false);
+  }
+
+  /// Replaces a transect's cached cover with [rows], in one transaction --
+  /// a category that's gone from the new result is gone from the cache, not
+  /// left over from the last run. Every row must be for [sessionId].
+  Future<void> replaceTransectCover(int sessionId, List<TransectCoverRow> rows) async {
+    for (final row in rows) {
+      if (row.sessionId != sessionId) {
+        throw ArgumentError('Cover row for session ${row.sessionId} passed for session $sessionId');
+      }
+    }
+    await _db.transaction((txn) async {
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+      final batch = txn.batch();
+      for (final row in rows) {
+        batch.insert(_coverTable, row.toMap());
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<List<TransectCoverRow>> coverForSession(int sessionId) async {
+    final rows = await _db.query(
+      _coverTable,
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'category_code',
+    );
+    return rows.map(TransectCoverRow.fromMap).toList(growable: false);
   }
 
   Future<void> close() => _db.close();
