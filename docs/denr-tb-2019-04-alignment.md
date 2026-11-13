@@ -205,7 +205,7 @@ physical frame stays the default.
 
 ### Build order
 
-1. **Level indicator (in both modes).** Tilt is shown on screen and saved with each photo. It is small
+1. **Level indicator (in both modes).** Tilt is shown on screen and saved with each photo. **Built in #4 (2026-11-14)**: advisory in Physical mode, green ≤5°, amber ≤10° (`docs/photo-transect-capture-and-tilt.md`). It is small
    and self-contained. Build it before November 15 **only if** it can be tested on the phone the day
    before; otherwise build it after the dive.
 2. **Lens calibration underwater.** In a pool, photograph a 1 m × 1 m square at known distances with each

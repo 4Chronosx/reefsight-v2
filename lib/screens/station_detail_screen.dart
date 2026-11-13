@@ -12,7 +12,6 @@ import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/section_card.dart';
 import 'app_shell.dart' show routeObserver;
-import 'capture_placeholder_screen.dart';
 import 'station_edit_screen.dart';
 import 'station_transect_setup_screen.dart';
 import 'summary_screen.dart';
@@ -33,6 +32,7 @@ class StationDetailScreen extends StatefulWidget {
     this.openDatabase = openAppDatabase,
     this.deleteFiles = deleteSessionFilesInDocuments,
     this.buildTransectSetup,
+    this.buildCapture,
   });
 
   /// Named so Live's end handoff can return a station transect's Summary
@@ -53,6 +53,11 @@ class StationDetailScreen extends StatefulWidget {
   /// Builds the transect setup; `null` uses the real one with
   /// [openDatabase]. Injectable so tests can hand it fake device checks.
   final TransectSetupBuilder? buildTransectSetup;
+
+  /// What tapping a photo or preliminary transect opens: its capture flow
+  /// (#4 photo capture and review), [buildCaptureScreen] by default.
+  /// Injected in tests, which have no camera.
+  final Widget Function(CaptureStart start)? buildCapture;
 
   @override
   State<StationDetailScreen> createState() => _StationDetailScreenState();
@@ -131,13 +136,14 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
         ),
       );
 
+  Widget _defaultCapture(CaptureStart start) =>
+      buildCaptureScreen(start, openDatabase: widget.openDatabase);
+
   void _openTransect(Station station, TransectSession t) => _push(
         station.surveyType == SurveyType.colonyCount
             ? SummaryScreen(sessionId: t.id!, openDatabase: widget.openDatabase)
-            : CapturePlaceholderScreen(
-                station: station,
-                sessionId: t.id!,
-                transectNumber: t.transectNumber ?? 0,
+            : (widget.buildCapture ?? _defaultCapture)(
+                CaptureStart(station: station, sessionId: t.id!, transectNumber: t.transectNumber ?? 0),
               ),
       );
 

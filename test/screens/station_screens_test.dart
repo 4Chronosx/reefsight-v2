@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/capture_placeholder_screen.dart';
 import 'package:reefsight_mobile/screens/home_screen.dart';
+import 'package:reefsight_mobile/screens/photo_transect_capture_screen.dart';
 import 'package:reefsight_mobile/screens/station_detail_screen.dart';
 import 'package:reefsight_mobile/screens/station_edit_screen.dart';
 import 'package:reefsight_mobile/screens/station_transect_setup_screen.dart';
@@ -19,6 +21,7 @@ import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_placement.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
+import '../support/fake_capture.dart';
 import '../support/fake_device.dart';
 import '../support/fake_location.dart';
 
@@ -662,14 +665,48 @@ void main() {
     expect(find.byType(StationDetailScreen), findsOneWidget);
   });
 
+  // Issue #4: which capture flow a station transect opens.
+  test('buildCaptureScreen: in-app photo capture for a physical or virtual frame, else the placeholder', () {
+    CaptureStart start(SurveyType type, FrameMode? mode) => CaptureStart(
+          station: Station(
+            code: 'ALG-S1',
+            surveyType: type,
+            frameMode: mode,
+            surveyedOn: DateTime(2026, 11, 15),
+            createdAt: DateTime.utc(2026, 11, 14),
+          ),
+          sessionId: 1,
+          transectNumber: 1,
+        );
+    expect(buildCaptureScreen(start(SurveyType.photoTransect, FrameMode.physical)),
+        isA<PhotoTransectCaptureScreen>());
+    expect(buildCaptureScreen(start(SurveyType.photoTransect, FrameMode.virtual)),
+        isA<PhotoTransectCaptureScreen>());
+    expect(buildCaptureScreen(start(SurveyType.photoTransect, FrameMode.importedMixed)),
+        isA<CapturePlaceholderScreen>());
+    expect(buildCaptureScreen(start(SurveyType.preliminaryVideo, null)), isA<CapturePlaceholderScreen>());
+  });
+
   // Issue #2's "Done when": a station with 3 transects, each opening its
-  // capture flow. Photo transect, so each Start goes to the placeholder (the
-  // real capture is #4) and back to the station.
+  // capture flow -- since #4, the photo capture screen (fake camera), and
+  // back to the station.
   testWidgets('end to end: three photo transects, each opening capture', (tester) async {
     _useTallSurface(tester);
     final db = await _db();
     final id = await db.insertStation(_station());
     final fake = FakeDevice();
+    final docs = Directory.systemTemp.createTempSync('reefsight_e2e_capture_');
+    addTearDown(() => docs.deleteSync(recursive: true));
+    Widget capture(CaptureStart start) => PhotoTransectCaptureScreen(
+          station: start.station,
+          sessionId: start.sessionId,
+          transectNumber: start.transectNumber,
+          openDatabase: () async => db,
+          cameraOpener: FakeStillCameraOpener(FakeStillCamera(docs)),
+          tiltSource: FakeTiltSource(),
+          screenAwake: FakeScreenAwake(),
+          documentsDirectory: () async => docs.path,
+        );
 
     await tester.pumpWidget(MaterialApp(
       home: StationDetailScreen(
@@ -682,7 +719,11 @@ void main() {
           batteryInfo: fake,
           thermalInfo: fake,
           locationProvider: FakeLocationProvider.fix(),
+          openCapture: (context, start) => Navigator.of(context).pushReplacement(
+            MaterialPageRoute<void>(builder: (_) => capture(start)),
+          ),
         ),
+        buildCapture: capture,
       ),
     ));
     await tester.pumpAndSettle();
@@ -692,9 +733,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(ElevatedButton, 'Start photo capture'));
       await tester.pumpAndSettle();
-      expect(find.byType(CapturePlaceholderScreen), findsOneWidget);
-      expect(find.textContaining('T$n'), findsWidgets);
-      await tester.tap(find.text('Back to station'));
+      expect(find.byType(PhotoTransectCaptureScreen), findsOneWidget);
+      expect(find.text('ALG-S1 · T$n'), findsOneWidget);
+      await tester.pageBack();
       await tester.pumpAndSettle();
       expect(find.byType(StationDetailScreen), findsOneWidget);
     }

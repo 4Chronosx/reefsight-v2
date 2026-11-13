@@ -70,7 +70,11 @@ any non-trivial architecture decision.
   **done 2026-11-14.** Station and T-number on the per-transect report and CSVs, a research label
   everywhere, a database guard that keeps colony-count transects out of frames and cover, and Live
   refusing to record a station transect it couldn't save.
-- **Next: #4**, in-app photo capture.
+- **#4 Photo transect capture with level indicator** (`sub-plans/23-photo-transect-capture.md`):
+  **done 2026-11-14** (tests; device check pending). One still per meter mark (0 to the tape length)
+  through the `camera` plugin, tilt from the accelerometer shown live and saved as `tilt_deg`, retake,
+  mark missing (an excluded row with no image), Review and Finish, resume on reopen.
+- **Next: #5**, photo import.
 
 ## Explicitly out of scope for now
 

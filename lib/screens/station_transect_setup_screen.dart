@@ -16,6 +16,7 @@ import '../widgets/glove_button.dart';
 import '../widgets/ready_to_dive_card.dart';
 import '../widgets/section_card.dart';
 import 'capture_placeholder_screen.dart';
+import 'photo_transect_capture_screen.dart';
 import 'station_edit_screen.dart' show FlagLine;
 import 'transect_setup_screen.dart';
 
@@ -31,18 +32,32 @@ class CaptureStart {
 
 typedef OpenCapture = void Function(BuildContext context, CaptureStart start);
 
-/// The real [OpenCapture] until #4 and #13 land. Replaces Setup, so the
-/// back button returns to the station rather than to a form whose transect
-/// is already saved.
-void pushCapturePlaceholder(BuildContext context, CaptureStart start) {
+/// The capture flow for a station transect: in-app photo capture (#4) for a
+/// photo-transect station with a physical or virtual frame; the placeholder
+/// for photo import (#5) and preliminary video (#13) until they land.
+/// Station detail reopens a transect through this too.
+Widget buildCaptureScreen(CaptureStart start, {DatabaseOpener openDatabase = openAppDatabase}) {
+  final station = start.station;
+  if (station.surveyType == SurveyType.photoTransect && station.frameMode != FrameMode.importedMixed) {
+    return PhotoTransectCaptureScreen(
+      station: station,
+      sessionId: start.sessionId,
+      transectNumber: start.transectNumber,
+      openDatabase: openDatabase,
+    );
+  }
+  return CapturePlaceholderScreen(
+    station: station,
+    sessionId: start.sessionId,
+    transectNumber: start.transectNumber,
+  );
+}
+
+/// The real [OpenCapture]. Replaces Setup, so the back button returns to
+/// the station rather than to a form whose transect is already saved.
+void pushCapture(BuildContext context, CaptureStart start) {
   Navigator.of(context).pushReplacement(
-    MaterialPageRoute(
-      builder: (_) => CapturePlaceholderScreen(
-        station: start.station,
-        sessionId: start.sessionId,
-        transectNumber: start.transectNumber,
-      ),
-    ),
+    MaterialPageRoute(builder: (_) => buildCaptureScreen(start)),
   );
 }
 
@@ -71,7 +86,7 @@ class StationTransectSetupScreen extends StatefulWidget {
     this.thermalInfo = const PlatformDeviceInfo(),
     this.locationProvider = const GeolocatorLocationProvider(),
     this.startTransect = pushLiveTransect,
-    this.openCapture = pushCapturePlaceholder,
+    this.openCapture = pushCapture,
     this.random,
   });
 

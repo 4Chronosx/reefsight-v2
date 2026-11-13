@@ -838,6 +838,39 @@ class TransectDatabase {
     return _db.insert(_framesTable, frame.toMap()..remove('id'));
   }
 
+  /// Issue #4: saves a photo-transect still (or a missing-meter row) at its
+  /// meter mark, replacing whatever was there -- a retake, or a missing
+  /// meter photographed after all. The old row's points go with it (they
+  /// were scored on the old image), and so does the transect's cached cover,
+  /// all in the same transaction, so a failed
+  /// insert leaves the meter as it was. Returns the new row's id and the
+  /// replaced frame, if any, so the caller can delete its image file.
+  ///
+  /// Throws [ArgumentError] for a frame with no meter mark (a video frame)
+  /// or for a colony-count transect (#3).
+  Future<({int id, TransectFrame? replaced})> replaceFrameAtMeter(TransectFrame frame) async {
+    final meter = frame.meterMark;
+    if (meter == null) throw ArgumentError('A photo-transect frame needs a meter mark');
+    await _rejectColonyCount(frame.sessionId, 'frames');
+    return _db.transaction((txn) async {
+      final rows = await txn.query(
+        _framesTable,
+        where: 'session_id = ? AND meter_mark = ?',
+        whereArgs: [frame.sessionId, meter],
+      );
+      final replaced = rows.isEmpty ? null : TransectFrame.fromMap(rows.single);
+      if (replaced != null) {
+        await txn.delete(_pointsTable, where: 'frame_id = ?', whereArgs: [replaced.id]);
+        await txn.delete(_framesTable, where: 'id = ?', whereArgs: [replaced.id]);
+        // The cached cover (#7) was worked out from the old image's points:
+        // stale now, so it goes too and is recomputed on the next analysis.
+        await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [frame.sessionId]);
+      }
+      final id = await txn.insert(_framesTable, frame.toMap()..remove('id'));
+      return (id: id, replaced: replaced);
+    });
+  }
+
   /// Along the tape: by meter mark, then video time for preliminary frames.
   Future<List<TransectFrame>> framesForSession(int sessionId) async {
     final rows = await _db.query(

@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'colony_photos.dart';
+import 'photo_transect_store.dart';
 import 'transect_session.dart';
 import 'transect_video.dart';
 
@@ -14,8 +15,9 @@ import 'transect_video.dart';
 typedef SessionFilesDeleter = Future<void> Function(TransectSession session);
 
 /// Folders under the documents directory whose files are named
-/// `session<id>_...`: `MaskStorage` and `ColonyPhotoStore`.
-const _perSessionFolders = ['masks', ColonyPhotoStore.folder];
+/// `session<id>_...`: `MaskStorage`, `ColonyPhotoStore` and
+/// `PhotoTransectStore` (#4).
+const _perSessionFolders = ['masks', ColonyPhotoStore.folder, PhotoTransectStore.folder];
 
 /// Deletes [session]'s files under [documentsDirectory] and returns how many
 /// were removed:

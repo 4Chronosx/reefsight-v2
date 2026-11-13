@@ -43,7 +43,30 @@ enum DistanceMethod with DbEnum {
   final String db;
 }
 
+/// [TransectFrame.excludeReason] of a meter the diver marked as missing in
+/// photo capture (#4).
+const kMissingMeterReason = 'missing';
+
 class TransectFrame {
+  /// A meter mark the diver couldn't photograph (#4): a row with no image,
+  /// excluded from scoring. Keeping it as a row (rather than no row) tells a
+  /// skipped meter apart from one not reached yet, and `UNIQUE (session_id,
+  /// meter_mark)` keeps each meter either captured or missing, never both.
+  factory TransectFrame.missingMeter({
+    required int sessionId,
+    required double meterMark,
+    DateTime? markedAt,
+  }) =>
+      TransectFrame(
+        sessionId: sessionId,
+        meterMark: meterMark,
+        imagePath: '',
+        source: FrameSource.inApp,
+        capturedAt: markedAt,
+        excluded: true,
+        excludeReason: kMissingMeterReason,
+      );
+
   TransectFrame({
     this.id,
     required this.sessionId,
@@ -116,6 +139,9 @@ class TransectFrame {
   /// Dropped from scoring, with [excludeReason].
   final bool excluded;
   final String? excludeReason;
+
+  /// A [TransectFrame.missingMeter] row: no image to show or score.
+  bool get isMissing => imagePath.isEmpty && excludeReason == kMissingMeterReason;
 
   static String? cornersToJson(List<NormPoint>? corners) =>
       corners == null ? null : jsonEncode([for (final c in corners) [c.x, c.y]]);
