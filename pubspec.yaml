@@ -87,6 +87,14 @@ dependencies:
   # (alignment doc §6, build order step 1).
   sensors_plus: ^7.1.1
 
+  # Issue #5 (photo import): photo transects shot on another camera (a
+  # GoPro, any >= 5 MP camera; TB 2017-05), picked from the Photos library
+  # (`image_picker`, full metadata kept for EXIF ordering) or the Files app
+  # (`file_picker`, the original file byte for byte). Both are copied into
+  # app storage; the sources are never changed (alignment doc §9).
+  image_picker: ^1.2.3
+  file_picker: ^11.0.3
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an

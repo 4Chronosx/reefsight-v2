@@ -2,6 +2,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 import 'category_mapping.dart';
+import 'db_enum.dart';
 import 'device_checks.dart';
 import 'frame_point.dart';
 import 'geo_fix.dart';
@@ -882,27 +883,138 @@ class TransectDatabase {
     return rows.map(TransectFrame.fromMap).toList(growable: false);
   }
 
+  /// Issue #5: saves an imported transect's whole ordered set -- photos and
+  /// gap rows, each at its meter mark -- in one transaction, so a failure
+  /// leaves the transect as it was. [frames] is the complete new state:
+  ///
+  /// - a frame with an `id` is an existing row of this transect, kept (its
+  ///   points too -- they sit on the image, not the meter) and moved to its
+  ///   new meter mark, with its fisheye flag rewritten;
+  /// - a frame without one is inserted;
+  /// - an existing row not listed is deleted with its points, and handed
+  ///   back in `removed` so the caller can delete its file after the commit.
+  ///
+  /// Kept rows are parked at negative meter marks first, so a swap never
+  /// trips `UNIQUE (session_id, meter_mark)` halfway. Any change clears the
+  /// transect's cached cover; an identical re-save leaves it.
+  ///
+  /// Throws [ArgumentError] (before writing anything) for a frame with no
+  /// meter mark, two frames at one meter, a frame of another transect, an
+  /// `id` that isn't a row of this transect, or a colony-count transect.
+  Future<({List<TransectFrame> removed})> saveImportedFrames(int sessionId, List<TransectFrame> frames) async {
+    await _rejectColonyCount(sessionId, 'frames');
+    final meters = <double>{};
+    for (final f in frames) {
+      if (f.sessionId != sessionId) throw ArgumentError('Frame of transect ${f.sessionId} saved to $sessionId');
+      final meter = f.meterMark;
+      if (meter == null) throw ArgumentError('An imported photo-transect frame needs a meter mark');
+      if (!meters.add(meter)) throw ArgumentError('Two frames at meter $meter');
+    }
+
+    return _db.transaction((txn) async {
+      final existing = {
+        for (final row in await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]))
+          row['id'] as int: TransectFrame.fromMap(row),
+      };
+      final keptIds = {for (final f in frames) if (f.id != null) f.id!};
+      final unknown = keptIds.difference(existing.keys.toSet());
+      if (unknown.isNotEmpty) throw ArgumentError('Not frames of transect $sessionId: $unknown');
+
+      final removed = [for (final f in existing.values) if (!keptIds.contains(f.id)) f];
+      for (final f in removed) {
+        await txn.delete(_pointsTable, where: 'frame_id = ?', whereArgs: [f.id]);
+        await txn.delete(_framesTable, where: 'id = ?', whereArgs: [f.id]);
+      }
+
+      // Gap rows are rewritten every save; they only count as a change if
+      // the gaps moved. Any photo removed or added is a change.
+      final kept = [for (final f in frames) if (f.id != null) f];
+      Set<double?> gaps(Iterable<TransectFrame> fs) => {for (final f in fs) if (f.isMissing) f.meterMark};
+      final removedPhotos = removed.where((f) => !f.isMissing).length;
+      final addedPhotos = frames.where((f) => f.id == null && !f.isMissing).length;
+      final oldGaps = gaps(removed), newGaps = gaps(frames.where((f) => f.id == null));
+      var changed = removedPhotos > 0 ||
+          addedPhotos > 0 ||
+          oldGaps.length != newGaps.length ||
+          !oldGaps.containsAll(newGaps);
+      for (final f in kept) {
+        final old = existing[f.id]!;
+        if (old.meterMark != f.meterMark || old.fisheyeFlag != f.fisheyeFlag) changed = true;
+        await txn.update(_framesTable, {'meter_mark': -f.id!.toDouble()}, where: 'id = ?', whereArgs: [f.id]);
+      }
+      for (final f in kept) {
+        await txn.update(
+          _framesTable,
+          {'meter_mark': f.meterMark, 'fisheye_flag': boolToDb(f.fisheyeFlag)},
+          where: 'id = ?',
+          whereArgs: [f.id],
+        );
+      }
+      for (final f in frames) {
+        if (f.id == null) await txn.insert(_framesTable, f.toMap()..remove('id'));
+      }
+      if (changed) await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+      return (removed: removed);
+    });
+  }
+
+  /// Sets a frame's 1 × 1 m area (#5 corner editor). The frame's points were
+  /// placed inside the old corners and the transect's cover was worked out
+  /// from them, so both are dropped in the same transaction (recomputed on
+  /// the next analysis) -- the same rule as a retake (#4). Saving the same
+  /// corners and source again changes nothing, so scored points survive a
+  /// diver stepping through and re-saving. Corners on a photo marked "no
+  /// frame visible" mean a frame is visible after all, so that exclusion is
+  /// lifted in the same transaction. Throws [ArgumentError] for an unknown
+  /// frame.
   Future<void> updateFrameCorners(int frameId, List<NormPoint> corners, CornerSource source) async {
     if (corners.length != 4) {
       throw ArgumentError.value(corners.length, 'corners', 'A frame needs exactly 4 corners');
     }
-    await _db.update(
-      _framesTable,
-      {'corners_json': TransectFrame.cornersToJson(corners), 'corner_source': source.db},
-      where: 'id = ?',
-      whereArgs: [frameId],
-    );
+    final json = TransectFrame.cornersToJson(corners);
+    await _db.transaction((txn) async {
+      final rows = await txn.query(_framesTable, where: 'id = ?', whereArgs: [frameId]);
+      if (rows.isEmpty) throw ArgumentError.value(frameId, 'frameId', 'No such frame');
+      final old = rows.single;
+      final noFrame = old['exclude_reason'] == kNoFrameReason;
+      if (old['corners_json'] == json && old['corner_source'] == source.db && !noFrame) return;
+      await txn.update(
+        _framesTable,
+        {
+          'corners_json': json,
+          'corner_source': source.db,
+          if (noFrame) ...{'excluded': 0, 'exclude_reason': null},
+        },
+        where: 'id = ?',
+        whereArgs: [frameId],
+      );
+      final moved = old['corners_json'] != json;
+      if (moved) await txn.delete(_pointsTable, where: 'frame_id = ?', whereArgs: [frameId]);
+      if (moved || noFrame) await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [old['session_id']]);
+    });
   }
 
   /// Drops a frame from scoring, or brings it back. Bringing it back clears
-  /// the reason.
+  /// the reason. Either way the set of frames that count has changed, so the
+  /// transect's cached cover goes (the frame's own points stay: the image
+  /// didn't change). Throws [ArgumentError] for an unknown frame.
   Future<void> setFrameExcluded(int frameId, {required bool excluded, String? reason}) async {
-    await _db.update(
-      _framesTable,
-      {'excluded': excluded ? 1 : 0, 'exclude_reason': excluded ? reason : null},
-      where: 'id = ?',
-      whereArgs: [frameId],
-    );
+    await _db.transaction((txn) async {
+      final sessionId = await _sessionOfFrame(txn, frameId);
+      await txn.update(
+        _framesTable,
+        {'excluded': excluded ? 1 : 0, 'exclude_reason': excluded ? reason : null},
+        where: 'id = ?',
+        whereArgs: [frameId],
+      );
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+    });
+  }
+
+  Future<int> _sessionOfFrame(Transaction txn, int frameId) async {
+    final rows = await txn.query(_framesTable, columns: ['session_id'], where: 'id = ?', whereArgs: [frameId]);
+    if (rows.isEmpty) throw ArgumentError.value(frameId, 'frameId', 'No such frame');
+    return rows.single['session_id'] as int;
   }
 
   /// Inserts a frame's scoring points in one transaction: all or nothing,

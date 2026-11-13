@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
+import '../services/photo_import_checks.dart' show kMinPixels;
 import '../services/photo_transect_capture.dart';
 import '../services/photo_transect_store.dart';
 import '../services/screen_awake.dart';
@@ -15,6 +16,7 @@ import '../services/tilt.dart';
 import '../services/transect_database.dart';
 import '../services/transect_frame.dart';
 import '../widgets/glove_button.dart';
+import 'frame_corner_editor_screen.dart';
 
 /// The app's documents directory -- the capture screen's default, injected
 /// because `path_provider` has no platform channel under `flutter test`.
@@ -592,7 +594,27 @@ class _ReviewScreenState extends State<_ReviewScreen> {
     final summary = '${_c.capturedCount} photo${_c.capturedCount == 1 ? '' : 's'} · '
         '${_c.missingCount} missing · ${_c.pendingCount} to do';
     return Scaffold(
-      appBar: AppBar(title: Text('Review ${widget.title}')),
+      appBar: AppBar(
+        title: Text('Review ${widget.title}'),
+        actions: [
+          // #5: the corner editor works on in-app stills too.
+          TextButton.icon(
+            key: const ValueKey('open-corners'),
+            onPressed: _c.capturedCount == 0 || _finishing
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => FrameCornerEditorScreen(
+                        db: _c.db,
+                        sessionId: _c.sessionId,
+                        documentsDirectory: _c.store.documentsDirectory,
+                        title: widget.title,
+                      ),
+                    )),
+            icon: const Icon(Icons.crop_free),
+            label: const Text('Corners'),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -642,8 +664,6 @@ class _ReviewScreenState extends State<_ReviewScreen> {
   }
 }
 
-/// TB 2017-05's minimum camera resolution.
-const _minPixels = 5000000;
 
 class _MeterTile extends StatelessWidget {
   const _MeterTile({
@@ -664,7 +684,7 @@ class _MeterTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final f = frame;
     final tilt = f?.tiltDeg;
-    final lowRes = f != null && f.widthPx != null && f.heightPx != null && f.widthPx! * f.heightPx! < _minPixels;
+    final lowRes = f != null && f.widthPx != null && f.heightPx != null && f.widthPx! * f.heightPx! < kMinPixels;
     final Widget picture = switch (status) {
       MeterStatus.captured => Image.file(
           imageFile(f!),

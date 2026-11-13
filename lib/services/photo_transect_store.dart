@@ -53,6 +53,31 @@ class PhotoTransectStore {
     return StoredStill(relativePath: relative, width: size?.width, height: size?.height);
   }
 
+  /// Issue #5: copies an imported photo into the store as
+  /// `session<id>_imp<NNN>_<epoch ms>.<ext>` and returns its relative path.
+  /// A **copy**, never a move: the source (the picker's file, or one in the
+  /// Files app) is left exactly as it was. The extension is kept, lowercased
+  /// (`.jpg`, `.heic`), so the format stays visible; `.img` if there is
+  /// none. [index] is the photo's position in the import, so names don't
+  /// collide within one [at].
+  Future<String> importCopy(String sourcePath, {required int index, required DateTime at}) async {
+    await Directory(p.join(documentsDirectory, folder)).create(recursive: true);
+    final ext = p.extension(sourcePath).toLowerCase();
+    final n = index.toString().padLeft(3, '0');
+    final relative =
+        p.posix.join(folder, 'session${sessionId}_imp${n}_${at.millisecondsSinceEpoch}${ext.isEmpty ? '.img' : ext}');
+    final target = absolutePath(relative);
+    final staged = File('$target.tmp');
+    try {
+      await File(sourcePath).copy(staged.path);
+      await staged.rename(target);
+    } catch (_) {
+      await _deleteQuietly(staged);
+      rethrow;
+    }
+    return relative;
+  }
+
   /// Removes a stored still. An empty path (a missing meter) or a file
   /// that's already gone is fine; a failed delete is logged, never thrown --
   /// the worst case is a leftover file, which the survey delete sweeps.

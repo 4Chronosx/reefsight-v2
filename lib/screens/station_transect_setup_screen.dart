@@ -16,6 +16,7 @@ import '../widgets/glove_button.dart';
 import '../widgets/ready_to_dive_card.dart';
 import '../widgets/section_card.dart';
 import 'capture_placeholder_screen.dart';
+import 'photo_import_screen.dart';
 import 'photo_transect_capture_screen.dart';
 import 'station_edit_screen.dart' show FlagLine;
 import 'transect_setup_screen.dart';
@@ -33,12 +34,20 @@ class CaptureStart {
 typedef OpenCapture = void Function(BuildContext context, CaptureStart start);
 
 /// The capture flow for a station transect: in-app photo capture (#4) for a
-/// photo-transect station with a physical or virtual frame; the placeholder
-/// for photo import (#5) and preliminary video (#13) until they land.
-/// Station detail reopens a transect through this too.
+/// photo-transect station with a physical or virtual frame, photo import
+/// (#5) for an imported one, and the placeholder for preliminary video
+/// (#13) until it lands. Station detail reopens a transect through this too.
 Widget buildCaptureScreen(CaptureStart start, {DatabaseOpener openDatabase = openAppDatabase}) {
   final station = start.station;
-  if (station.surveyType == SurveyType.photoTransect && station.frameMode != FrameMode.importedMixed) {
+  if (station.surveyType == SurveyType.photoTransect && station.frameMode == FrameMode.importedMixed) {
+    return PhotoImportScreen(
+      station: station,
+      sessionId: start.sessionId,
+      transectNumber: start.transectNumber,
+      openDatabase: openDatabase,
+    );
+  }
+  if (station.surveyType == SurveyType.photoTransect) {
     return PhotoTransectCaptureScreen(
       station: station,
       sessionId: start.sessionId,

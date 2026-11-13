@@ -47,6 +47,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>ReefSight uses the camera for live coral colony segmentation during dive transects and to take photo-transect stills.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ReefSight imports photo-transect photos you took with another camera, such as a GoPro, and reads their capture time to put them in order.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>ReefSight records your position at the start and end of a transect.</string>
 	<key>UIFileSharingEnabled</key>

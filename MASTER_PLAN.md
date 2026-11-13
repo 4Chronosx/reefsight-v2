@@ -74,7 +74,12 @@ any non-trivial architecture decision.
   **done 2026-11-14** (tests; device check pending). One still per meter mark (0 to the tape length)
   through the `camera` plugin, tilt from the accelerometer shown live and saved as `tilt_deg`, retake,
   mark missing (an excluded row with no image), Review and Finish, resume on reopen.
-- **Next: #5**, photo import.
+- **#5 Photo import and frame corner editor** (`sub-plans/24-photo-import-and-corners.md`):
+  **done 2026-11-14** (tests; device check pending). Import from Photos or Files into an
+  imported-frame station's transect (copied, never moved), ordered by EXIF time with a filename
+  fallback, reorder/remove/gaps, 5 MP / count / fisheye checks, camera and time saved per frame;
+  a shared corner editor (drag, copy previous, no frame visible) for imported and in-app photos.
+- **Next: #6**, category mapping, point sampling and transect cover.
 
 ## Explicitly out of scope for now
 

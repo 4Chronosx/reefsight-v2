@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reefsight_mobile/screens/capture_placeholder_screen.dart';
 import 'package:reefsight_mobile/screens/home_screen.dart';
+import 'package:reefsight_mobile/screens/photo_import_screen.dart';
 import 'package:reefsight_mobile/screens/photo_transect_capture_screen.dart';
 import 'package:reefsight_mobile/screens/station_detail_screen.dart';
 import 'package:reefsight_mobile/screens/station_edit_screen.dart';
@@ -666,7 +667,7 @@ void main() {
   });
 
   // Issue #4: which capture flow a station transect opens.
-  test('buildCaptureScreen: in-app photo capture for a physical or virtual frame, else the placeholder', () {
+  test('buildCaptureScreen: in-app capture for a physical or virtual frame, import for imported, else the placeholder', () {
     CaptureStart start(SurveyType type, FrameMode? mode) => CaptureStart(
           station: Station(
             code: 'ALG-S1',
@@ -683,7 +684,7 @@ void main() {
     expect(buildCaptureScreen(start(SurveyType.photoTransect, FrameMode.virtual)),
         isA<PhotoTransectCaptureScreen>());
     expect(buildCaptureScreen(start(SurveyType.photoTransect, FrameMode.importedMixed)),
-        isA<CapturePlaceholderScreen>());
+        isA<PhotoImportScreen>());
     expect(buildCaptureScreen(start(SurveyType.preliminaryVideo, null)), isA<CapturePlaceholderScreen>());
   });
 

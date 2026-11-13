@@ -47,21 +47,27 @@ enum DistanceMethod with DbEnum {
 /// photo capture (#4).
 const kMissingMeterReason = 'missing';
 
+/// [TransectFrame.excludeReason] of a photo with no physical frame in view
+/// (#5): it can't be scored as an official photo transect (alignment doc §9).
+const kNoFrameReason = 'no_frame';
+
 class TransectFrame {
-  /// A meter mark the diver couldn't photograph (#4): a row with no image,
-  /// excluded from scoring. Keeping it as a row (rather than no row) tells a
-  /// skipped meter apart from one not reached yet, and `UNIQUE (session_id,
+  /// A meter mark the diver couldn't photograph (#4), or a gap in an
+  /// imported set (#5, [source] `imported`): a row with no image, excluded
+  /// from scoring. Keeping it as a row (rather than no row) tells a skipped
+  /// meter apart from one not reached yet, and `UNIQUE (session_id,
   /// meter_mark)` keeps each meter either captured or missing, never both.
   factory TransectFrame.missingMeter({
     required int sessionId,
     required double meterMark,
     DateTime? markedAt,
+    FrameSource source = FrameSource.inApp,
   }) =>
       TransectFrame(
         sessionId: sessionId,
         meterMark: meterMark,
         imagePath: '',
-        source: FrameSource.inApp,
+        source: source,
         capturedAt: markedAt,
         excluded: true,
         excludeReason: kMissingMeterReason,

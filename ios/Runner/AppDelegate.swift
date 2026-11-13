@@ -1,4 +1,5 @@
 import Flutter
+import ImageIO
 import UIKit
 
 @main
@@ -37,6 +38,31 @@ import UIKit
         }
       case "thermalState":
         result(ProcessInfo.processInfo.thermalState.rawValue)
+      case "photoMetadata":
+        // Issue #5: an imported photo's header (HEIC and anything else
+        // Dart can't parse), read by `NativePhotoMetadataReader` in
+        // lib/services/photo_metadata.dart. ImageIO reads properties only,
+        // never decoding the image. Size is as stored; Dart applies the
+        // orientation.
+        guard let args = call.arguments as? [String: Any], let path = args["path"] as? String,
+              let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else {
+          result(nil)
+          return
+        }
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        var reply: [String: Any] = [:]
+        reply["width"] = props[kCGImagePropertyPixelWidth]
+        reply["height"] = props[kCGImagePropertyPixelHeight]
+        reply["orientation"] = props[kCGImagePropertyOrientation]
+        reply["make"] = tiff[kCGImagePropertyTIFFMake]
+        reply["model"] = tiff[kCGImagePropertyTIFFModel]
+        reply["dateTimeOriginal"] = exif[kCGImagePropertyExifDateTimeOriginal]
+        reply["offsetTimeOriginal"] = exif[kCGImagePropertyExifOffsetTimeOriginal]
+        reply["focalLength35mm"] = exif[kCGImagePropertyExifFocalLenIn35mmFilm]
+        result(reply)
       default:
         result(FlutterMethodNotImplemented)
       }
