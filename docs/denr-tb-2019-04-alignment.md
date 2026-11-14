@@ -370,7 +370,7 @@ of its own, for **both survey types**.
   `mobile/sub-plans/20-schema-v11-stations.md`). The station screens are built too (#2, written up in
   `mobile/sub-plans/21-station-screens.md`): stations list with an Unassigned group for older surveys,
   create/edit, station detail, and per-transect setup with the random placement generator and the
-  depth and tape flags. The summary and export come next (#8). The station's deeper-edge GPS fix is stored the same way as the transect
+  depth and tape flags. The summary and CPCe export are built too (#8, `mobile/sub-plans/27-station-summary-and-cpce-export.md`; reasoning in `docs/station-summary-statistics-and-grading.md`). The station's deeper-edge GPS fix is stored the same way as the transect
   entry and exit fixes, so it records whether the fix came from GPS or was typed in.
 
 ## 9. Proposed feature: importing photo-transect photos

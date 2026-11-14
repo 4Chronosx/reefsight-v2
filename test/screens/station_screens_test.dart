@@ -11,6 +11,7 @@ import 'package:reefsight_mobile/screens/photo_import_screen.dart';
 import 'package:reefsight_mobile/screens/photo_transect_capture_screen.dart';
 import 'package:reefsight_mobile/screens/station_detail_screen.dart';
 import 'package:reefsight_mobile/screens/station_edit_screen.dart';
+import 'package:reefsight_mobile/screens/station_summary_screen.dart';
 import 'package:reefsight_mobile/screens/station_transect_setup_screen.dart';
 import 'package:reefsight_mobile/screens/summary_screen.dart';
 import 'package:reefsight_mobile/screens/surveys_screen.dart';
@@ -18,6 +19,7 @@ import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/station_summary.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
 import 'package:reefsight_mobile/services/transect_frame.dart';
@@ -671,17 +673,135 @@ void main() {
       });
     });
 
-    testWidgets('photo stations keep the #8 placeholder and no research label', (tester) async {
+    testWidgets('photo stations have no research label, and no summary before any cover', (tester) async {
       _useTallSurface(tester);
       final db = await _db();
       final id = await db.insertStation(_station());
+      await db.insertSession(_transect(id, 1));
       await tester.pumpWidget(MaterialApp(
         home: StationDetailScreen(stationId: id, openDatabase: () async => db),
       ));
       await tester.pumpAndSettle();
 
       expect(find.text(kResearchScopeNote), findsNothing);
-      expect(find.textContaining('coming with #8'), findsOneWidget);
+      final button = tester.widget<OutlinedButton>(find.ancestor(
+        of: find.text('Station summary'),
+        matching: find.byWidgetPredicate((w) => w is OutlinedButton),
+      ));
+      expect(button.onPressed, isNull);
+      expect(find.text(kNoSummaryYet), findsOneWidget);
+    });
+
+    // Issue #8: the station summary and its CPCe export.
+    group('station summary (#8)', () {
+      const corners = [(x: 0.1, y: 0.1), (x: 0.9, y: 0.1), (x: 0.9, y: 0.9), (x: 0.1, y: 0.9)];
+
+      /// Transect [number] with one framed photo whose 10 points are [coral]
+      /// branching coral and the rest sand, scored as the laptop import does.
+      Future<int> scored(TransectDatabase db, int stationId, int number, int coral, {bool label = true}) async {
+        final session = await db.insertSession(_transect(stationId, number).copyWith(pointsPerFrame: 10));
+        final frame = await db.insertFrame(TransectFrame(
+          sessionId: session,
+          meterMark: 0,
+          imagePath: 'photo_transects/$session/m0.jpg',
+          source: FrameSource.inApp,
+          corners: corners,
+          cornerSource: CornerSource.manual,
+        ));
+        await db.ensureFramePoints(session);
+        if (label) {
+          for (final pt in await db.pointsForFrame(frame)) {
+            final isCoral = pt.pointIndex < coral;
+            await db.setPointModelLabel(
+              pt.id!,
+              modelClass: isCoral ? 'branching alive' : 'sand',
+              categoryCode: isCoral ? 'CB' : 'S',
+            );
+          }
+          await db.refreshTransectCover(session);
+        }
+        return session;
+      }
+
+      testWidgets('opens from the station once a transect has cover', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await scored(db, id, 1, 3);
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text(kNoSummaryYet), findsNothing);
+        await tester.tap(find.text('Station summary'));
+        await tester.pumpAndSettle();
+        expect(find.byType(StationSummaryScreen), findsOneWidget);
+      });
+
+      testWidgets('shows the station mean, SE, grade, bleaching, flags and the table', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await scored(db, id, 1, 3);
+        await scored(db, id, 2, 4);
+        await scored(db, id, 3, 5);
+        await scored(db, id, 4, 0, label: false);
+        StationCoverSummary? exported;
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            exportSheet: (summary) async => exported = summary,
+          ),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text('40.0%'), findsOneWidget);
+        expect(find.text('± 5.8 SE · 3 of 4 transects analyzed'), findsOneWidget);
+        expect(find.text('B (Good)'), findsOneWidget);
+        expect(find.text('Bleached coral 0.0%'), findsOneWidget);
+        expect(find.text('T4 not analyzed: left out of the summary'), findsOneWidget);
+        expect(find.text(kPreliminaryStamp), findsNothing);
+        for (final column in ['T1', 'T2', 'T3', 'Mean', 'SD', 'SE']) {
+          expect(find.text(column), findsOneWidget, reason: column);
+        }
+        expect(find.text('Hard coral'), findsOneWidget);
+        expect(find.text('Coral branching'), findsOneWidget);
+
+        await tester.tap(find.text('Export CPCe sheet'));
+        await tester.pumpAndSettle();
+        expect(exported?.n, 3);
+      });
+
+      testWidgets('a preliminary station is stamped and its grade indicative', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station(type: SurveyType.preliminaryVideo));
+        await scored(db, id, 1, 5);
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text(kPreliminaryStamp), findsOneWidget);
+        expect(find.text('A (Excellent), indicative'), findsOneWidget);
+        expect(find.text(kFlagFewTransects), findsOneWidget);
+      });
+
+      testWidgets('with no analyzed transect it says so and offers no export', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await scored(db, id, 1, 0, label: false);
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text(kNoSummaryYet), findsOneWidget);
+        expect(find.text('Export CPCe sheet'), findsNothing);
+      });
     });
   });
 

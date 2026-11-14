@@ -14,11 +14,13 @@ import '../services/session_files.dart';
 import '../services/session_summary.dart';
 import '../services/station.dart';
 import '../services/station_checks.dart';
+import '../services/station_summary.dart' show kNoSummaryYet;
 import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/section_card.dart';
 import 'app_shell.dart' show routeObserver;
 import 'station_edit_screen.dart';
+import 'station_summary_screen.dart';
 import 'station_transect_setup_screen.dart';
 import 'summary_screen.dart';
 
@@ -327,6 +329,7 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
         final transects = data!.transects;
         final full = transects.length >= kMaxTransects;
         final flags = stationFlags(station, transects.length);
+        final hasCover = data.cover.values.any((rows) => rows.isNotEmpty);
 
         return Scaffold(
           appBar: AppBar(
@@ -423,13 +426,21 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                     kColonyCountNoStationSummary,
                     style: TextStyle(color: Colors.grey.shade700, fontSize: 13, height: 1.4),
                   )
-                else
-                  // The station summary and CPCe export arrive with #8.
+                else ...[
+                  // Issue #8: open once any transect has cover.
                   OutlinedButton.icon(
-                    onPressed: null,
+                    onPressed: hasCover
+                        ? () => _push(StationSummaryScreen(stationId: station.id!, openDatabase: widget.openDatabase))
+                        : null,
                     icon: const Icon(Icons.summarize_outlined),
-                    label: const Text('Station summary (coming with #8)'),
+                    label: const Text('Station summary'),
                   ),
+                  if (!hasCover)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(kNoSummaryYet, style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                    ),
+                ],
               ],
             ),
           ),

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:csv/csv.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:reefsight_mobile/services/cover_calculator.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:reefsight_mobile/services/recount.dart';
@@ -10,7 +11,9 @@ import 'package:reefsight_mobile/services/report_exporter.dart';
 import 'package:reefsight_mobile/services/session_summary.dart';
 import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/station_summary.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
+import 'package:reefsight_mobile/services/transect_cover.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
 // Sub-plan 5 (ui-and-reporting), task 6: CSV export, adapted from v1's
@@ -553,6 +556,212 @@ void main() {
       expect(noneClassified['Prevalence (%)'], '');
       expect(noneClassified['Prevalence 95% High (%)'], '');
       expect(noneClassified['Density (/m²)'], '0.020');
+    });
+  });
+
+  // A cell starting with = + - @ (or tab / CR) is a formula to Excel. Free
+  // text gets a leading apostrophe; numbers, negative ones included, don't.
+  group('ReportExporter.csvSafe', () {
+    test('prefixes text that would be read as a formula', () {
+      for (final risky in ['=1+1', '+A1', '-cmd', '@SUM(A1)', '\t=1', '\r=1']) {
+        expect(ReportExporter.csvSafe(risky), "'$risky", reason: risky);
+      }
+    });
+
+    test('leaves numbers, negative numeric text and ordinary text alone', () {
+      for (final safe in <Object?>[-3, 4.5, '-12.50', '-0.5', 'Alegria MPA', '', null, true]) {
+        expect(ReportExporter.csvSafe(safe), safe, reason: '$safe');
+      }
+    });
+
+    test('applies to the session CSV\'s free text too', () async {
+      final dir = Directory.systemTemp.createTempSync('reefsight_safe_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final path = await ReportExporter.exportSessionCsv(
+        outputDirectory: dir.path,
+        session: TransectSession(
+          startedAt: DateTime.utc(2026, 11, 15),
+          tapeLengthMeters: 50,
+          siteName: '=HYPERLINK("x")',
+          observerName: 'Diver A',
+        ),
+      );
+      final rows = const CsvToListConverter(shouldParseNumbers: false, eol: '\n')
+          .convert(File(path).readAsStringSync().replaceAll('\r\n', '\n'));
+      expect(rows[1][0], '\'=HYPERLINK("x")');
+      expect(rows[1][1], 'Diver A');
+    });
+  });
+
+  // Issue #8: the station sheet in TB 2017-05's CPCe layout -- a column per
+  // transect, then mean, SD and SE.
+  group('ReportExporter.exportStationCpceCsv', () {
+    late Directory tempDir;
+    setUp(() => tempDir = Directory.systemTemp.createTempSync('reefsight_cpce_'));
+    tearDown(() => tempDir.deleteSync(recursive: true));
+
+    Station station({SurveyType type = SurveyType.photoTransect, String site = 'Alegria MPA'}) => Station(
+          id: 1,
+          code: 'ALG/S1',
+          name: 'Alegria north',
+          surveyType: type,
+          frameMode: type == SurveyType.photoTransect ? FrameMode.physical : null,
+          surveyedOn: DateTime(2026, 11, 15),
+          siteName: site,
+          depthMinM: 4,
+          depthMaxM: 5.5,
+          observerName: 'Diver A',
+          createdAt: DateTime.utc(2026, 11, 15),
+        );
+
+    /// Transect [n]: [hc] points of CB, [bleached] of BLEC, the rest of 100
+    /// sand, plus [excluded] TWB points; 11 frames.
+    StationTransectCover transect(int n, int hc, {int bleached = 0, int excluded = 0}) {
+      TransectCoverRow row(CoverLevel level, String code, int points) => TransectCoverRow(
+            sessionId: n,
+            categoryCode: code,
+            level: level,
+            points: points,
+            totalPoints: 100,
+            percent: points.toDouble(),
+          );
+      final sand = 100 - hc - bleached;
+      return StationTransectCover(
+        transect: TransectSession(
+          id: n,
+          startedAt: DateTime.utc(2026, 11, 15, n),
+          tapeLengthMeters: n == 2 ? 30 : 50,
+          stationId: 1,
+          transectNumber: n,
+          depthStartM: 4.5,
+          depthEndM: 5,
+          modelId: 'coralscapesv2-segformer-b5',
+          analyzedOn: AnalyzedOn.laptop,
+        ),
+        cover: CoverComputation(
+          rows: [
+            row(CoverLevel.code, 'CB', hc),
+            row(CoverLevel.code, 'BLEC', bleached),
+            row(CoverLevel.code, 'S', sand),
+            row(CoverLevel.major, 'HC', hc + bleached),
+            row(CoverLevel.major, 'DC', 0),
+            row(CoverLevel.major, 'AA', 0),
+            row(CoverLevel.major, 'OB', 0),
+            row(CoverLevel.major, 'AB', sand),
+          ],
+          framesScored: 11,
+          allPoints: 100 + excluded,
+          excludedPoints: excluded,
+          unlabeledPoints: 0,
+        ),
+      );
+    }
+
+    Future<(String, List<List<dynamic>>)> export(StationCoverSummary summary) async {
+      final path = await ReportExporter.exportStationCpceCsv(outputDirectory: tempDir.path, summary: summary);
+      final rows = const CsvToListConverter(shouldParseNumbers: false, eol: '\n')
+          .convert(File(path).readAsStringSync().replaceAll('\r\n', '\n'));
+      return (path, rows);
+    }
+
+    List<dynamic> rowOf(List<List<dynamic>> rows, String first) => rows.firstWhere((r) => r.first == first);
+
+    final three = [transect(1, 30, bleached: 10, excluded: 10), transect(2, 40), transect(3, 50, bleached: 5)];
+
+    test('is named for the site, station and survey day, sanitized', () async {
+      final (path, _) = await export(StationCoverSummary.compute(station(), three));
+      expect(p.basename(path), 'reefsight_Alegria_MPA_ALG_S1_cpce_2026-11-15.csv');
+      expect(p.dirname(path), tempDir.path);
+    });
+
+    // TB 2017-05 Figure 6: counts first (no statistics), then the major
+    // categories with MEAN, STD. DEV. and STD. ERROR, the TWB row over all
+    // points, a 100 % check row, then every subcategory grouped by major.
+    test('follows the CPCe sheet: counts, then majors with mean, SD and SE', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), three));
+      expect(rowOf(rows, 'TRANSECT NAME'), ['TRANSECT NAME', 'T1', 'T2', 'T3']);
+      expect(rowOf(rows, 'Number of frames'), ['Number of frames', '11', '11', '11']);
+      expect(rowOf(rows, 'Total points'), ['Total points', '110', '100', '100']);
+      expect(rowOf(rows, 'Total points (minus tape+wand+shadow)'),
+          ['Total points (minus tape+wand+shadow)', '100', '100', '100']);
+      expect(rowOf(rows, 'MAJOR CATEGORY (% of transect)'),
+          ['MAJOR CATEGORY (% of transect)', '', '', '', 'MEAN', 'STD. DEV.', 'STD. ERROR']);
+      // HC: 40, 40, 55 -> mean 45, SD 8.66, SE 5.00.
+      expect(rowOf(rows, 'HARD CORAL (HC)'), ['HARD CORAL (HC)', '40.00', '40.00', '55.00', '45.00', '8.66', '5.00']);
+      // TWB is over all points: 10 / 110.
+      expect(rowOf(rows, 'TAPE, WAND, SHADOW AND OTHER (TWB)').sublist(1, 4), ['9.09', '0.00', '0.00']);
+      expect(rowOf(rows, 'Sum (excluding tape+shadow+wand)'),
+          ['Sum (excluding tape+shadow+wand)', '100.00', '100.00', '100.00']);
+    });
+
+    test('lists every subcategory under its major, zeros included', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), three));
+      final labels = rows.map((r) => r.first).toList();
+      final start = labels.indexOf('SUBCATEGORIES (% of transect)');
+      expect(start, greaterThan(labels.indexOf('Sum (excluding tape+shadow+wand)')));
+      expect(labels.sublist(start + 1, start + 3), ['HARD CORAL (HC)', 'Acropora branching (ACB)']);
+      expect(rowOf(rows, 'Bleached coral (BLEC)'),
+          ['Bleached coral (BLEC)', '10.00', '0.00', '5.00', '5.00', '5.00', '2.89']);
+      expect(rowOf(rows, 'Mushroom coral (CMR)').sublist(1), ['0.00', '0.00', '0.00', '0.00', '0.00', '0.00']);
+      expect(labels, containsAllInOrder(['DEAD CORAL (DC)', 'ALGAE (AA)', 'OTHER BIOTA (OB)', 'ABIOTIC (AB)']));
+      expect(rowOf(rows, 'Sand (S)').sublist(1, 4), ['60.00', '60.00', '45.00']);
+    });
+
+    test('gives each transect\'s tape, depths and expert use after the table', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), three));
+      expect(rowOf(rows, 'Tape length (m)'), ['Tape length (m)', '50', '30', '50']);
+      expect(rowOf(rows, 'Depth end (m)').sublist(1), ['5.0', '5.0', '5.0']);
+      expect(rowOf(rows, 'Uses expert corrections')[1], 'no');
+    });
+
+    test('neutralizes free text Excel would read as a formula', () async {
+      final risky = station().copyWith(code: '=1+1', name: '+SUM(A1)', observerName: '@cmd');
+      final (path, rows) = await export(StationCoverSummary.compute(risky, three));
+      expect(rowOf(rows, 'Station')[1], "'=1+1");
+      expect(rowOf(rows, 'Name')[1], "'+SUM(A1)");
+      expect(rowOf(rows, 'Observer')[1], "'@cmd");
+      expect(p.basename(path), contains('_1_1_cpce_'));
+    });
+
+    test('ends with the station mean, grade, bleaching and flags', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), three));
+      expect(rowOf(rows, 'Hard coral cover (station mean, %)')[1], '45.0');
+      expect(rowOf(rows, 'Hard coral grade (TB 2019-04)')[1], 'A (Excellent)');
+      expect(rowOf(rows, 'Bleached coral (station mean, %)')[1], '5.0');
+      expect(rowOf(rows, 'Transects analyzed')[1], '3');
+      expect(rows.any((r) => r.first == 'Flag' && r[1] == 'T2: Tape is 30 m, not 50 m'), isTrue);
+    });
+
+    test('carries the station header', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), three));
+      expect(rowOf(rows, 'Station')[1], 'ALG/S1');
+      expect(rowOf(rows, 'Survey type')[1], 'Photo transect');
+      expect(rowOf(rows, 'Frame mode')[1], 'Physical frame');
+      expect(rowOf(rows, 'Depth range (m)')[1], '4.0-5.5');
+      expect(rowOf(rows, 'Model')[1], 'coralscapesv2-segformer-b5');
+      expect(rowOf(rows, 'Analyzed on')[1], 'laptop');
+      expect(rows.first.first, isNot(kPreliminaryStamp));
+    });
+
+    test('one transect leaves SD and SE blank', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), [transect(1, 30)]));
+      expect(rowOf(rows, 'HARD CORAL (HC)').sublist(1), ['30.00', '30.00', '', '']);
+    });
+
+    test('a preliminary station is stamped in its name, first line and grade', () async {
+      final (path, rows) =
+          await export(StationCoverSummary.compute(station(type: SurveyType.preliminaryVideo), three));
+      expect(p.basename(path), startsWith('PRELIMINARY_reefsight_'));
+      expect(rows.first.first, kPreliminaryStamp);
+      expect(rowOf(rows, 'Hard coral grade (TB 2019-04)')[1], 'A (Excellent), indicative');
+      expect(rowOf(rows, 'Report scope')[1], kPreliminaryStamp);
+    });
+
+    test('a station with no analyzed transects says so instead of a table', () async {
+      final (_, rows) = await export(StationCoverSummary.compute(station(), const []));
+      expect(rows.any((r) => r.first == 'TRANSECT NAME'), isFalse);
+      expect(rowOf(rows, 'Transects analyzed')[1], '0');
+      expect(rowOf(rows, 'Hard coral grade (TB 2019-04)')[1], '');
     });
   });
 }

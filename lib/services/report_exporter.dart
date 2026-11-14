@@ -9,6 +9,8 @@ import 'report_data.dart';
 import 'session_summary.dart';
 import 'station.dart';
 import 'station_checks.dart';
+import 'station_summary.dart';
+import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
 import 'transect_session.dart';
 
@@ -96,8 +98,24 @@ class ReportExporter {
     List<List<dynamic>> rows,
   ) async {
     final file = File('$outputDirectory/$filename');
-    await file.writeAsString(const ListToCsvConverter().convert(rows));
+    await file.writeAsString(const ListToCsvConverter().convert([
+      for (final row in rows) [for (final cell in row) csvSafe(cell)],
+    ]));
     return file.path;
+  }
+
+  static final _formulaStart = RegExp(r'^[=+\-@\t\r]');
+
+  /// Issue #8: text starting with `=`, `+`, `-`, `@`, a tab or a carriage
+  /// return is run as a formula by Excel and other spreadsheets ("CSV
+  /// injection"). Site, station, observer and other free text are typed by
+  /// the diver, so every exported cell goes through this: such text gets a
+  /// leading apostrophe, which spreadsheets show as plain text. Numbers, and
+  /// text that is a plain number (a negative difference like "-12.50"), are
+  /// left alone.
+  static Object? csvSafe(Object? cell) {
+    if (cell is! String || !_formulaStart.hasMatch(cell) || num.tryParse(cell) != null) return cell;
+    return "'$cell";
   }
 
   static Future<String> exportCsv({
@@ -337,6 +355,129 @@ class ReportExporter {
             ),
           ],
     ]);
+  }
+
+  static String _isoDay(DateTime d) => '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// Issue #8: `reefsight_<site>_<station>_cpce_<survey day>.csv`, with
+  /// `PRELIMINARY_` in front for a preliminary station, so the stamp is on
+  /// the file before anyone opens it (alignment doc §7).
+  static String stationCpceFilename(Station station) {
+    final prefix = station.surveyType == SurveyType.preliminaryVideo ? 'PRELIMINARY_' : '';
+    return '${prefix}reefsight_${_sanitizeForFilename(station.siteName)}_'
+        '${_sanitizeForFilename(station.code)}_cpce_${_isoDay(station.surveyedOn)}.csv';
+  }
+
+  static String _meters(double m) => m == m.roundToDouble() ? m.toStringAsFixed(0) : m.toString();
+
+  /// Issue #8: the station sheet in the layout of TB 2017-05's CPCe sample
+  /// (alignment doc §1b): a header, then a table with a column per analyzed
+  /// transect (T1…Tn) and then Mean, SD and SE -- the counts (frames, total
+  /// points, points excluded as tape, wand and shadow, points counted), each
+  /// major category's % cover and each TB code's -- and the station result:
+  /// mean hard coral cover, its TB 2019-04 grade, mean % bleached coral, and
+  /// every flag. Percentages have two decimals in the table; the result
+  /// lines show one, the precision the grade is taken at. A blank cell is a
+  /// value that doesn't exist (SD with one transect), never a zero.
+  static Future<String> exportStationCpceCsv({
+    required String outputDirectory,
+    required StationCoverSummary summary,
+  }) {
+    final station = summary.station;
+    final t = summary.analyzed;
+    final stamp = summary.isPreliminary ? kPreliminaryStamp : null;
+    String depth(double? m) => m?.toStringAsFixed(1) ?? '?';
+    String joined(Iterable<String?> values) => {...values.nonNulls}.join('; ');
+    String yesNo(bool value) => value ? 'yes' : 'no';
+
+    // TB 2017-05 Figure 6: counts and per-transect details have a value per
+    // transect and no statistics.
+    List<dynamic> perTransect(String label, Object? Function(StationTransectCover) value) =>
+        [label, for (final x in t) value(x) ?? ''];
+
+    List<dynamic> statRow(String label, CategoryStat s) =>
+        [label, for (final v in s.percents) _fixed(v), _fixed(s.mean), _fixed(s.sd), _fixed(s.se)];
+
+    List<dynamic> blockHeader(String label) =>
+        [label, for (final _ in t) '', 'MEAN', 'STD. DEV.', 'STD. ERROR'];
+
+    String majorLabel(String code) => '${kMajorNames[code]!.toUpperCase()} ($code)';
+    final excluded = summary.excludedStat;
+    final catalogue = summary.catalogueStats();
+
+    final hc = summary.hardCoral;
+    final bleached = summary.bleached;
+    return _write(outputDirectory, stationCpceFilename(station), [
+      if (stamp != null) [stamp],
+      ['ReefSight station summary (CPCe layout, TB 2017-05)'],
+      ['Station', station.code],
+      ['Name', station.name ?? ''],
+      ['Site', station.siteName ?? ''],
+      ['Surveyed on', _isoDay(station.surveyedOn)],
+      ['Survey type', surveyTypeLabel(station.surveyType)],
+      ['Frame mode', station.frameMode == null ? '' : frameModeLabel(station.frameMode!)],
+      ['Observer', station.observerName ?? ''],
+      ['Reef zone', station.reefZone == null ? '' : reefZoneLabel(station.reefZone!)],
+      [
+        'Depth range (m)',
+        station.depthMinM == null && station.depthMaxM == null
+            ? ''
+            : '${depth(station.depthMinM)}-${depth(station.depthMaxM)}',
+      ],
+      ['Deep edge (lat, lon, accuracy m, at, source)', ..._fixCells(station.deepEdgeFix)],
+      ['Model', joined(t.map((x) => x.transect.modelId))],
+      ['Analyzed on', joined(t.map((x) => x.transect.analyzedOn?.db))],
+      ['Uses expert corrections', yesNo(summary.usesExpert)],
+      ['Report scope', stamp ?? 'TB 2017-05 photo transect method; graded on the TB 2019-04 scale'],
+      [],
+      if (t.isNotEmpty && excluded != null) ...[
+        ['TRANSECT NAME', for (final x in t) x.label],
+        perTransect('Number of frames', (x) => x.cover.framesScored),
+        perTransect('Total points', (x) => x.cover.allPoints),
+        perTransect('Total points (minus tape+wand+shadow)', (x) => x.cover.countedPoints),
+        [],
+        blockHeader('MAJOR CATEGORY (% of transect)'),
+        for (final m in summary.majors) statRow(majorLabel(m.code), m),
+        // Over all points, as in CPCe; every other row is over points counted.
+        statRow('TAPE, WAND, SHADOW AND OTHER (TWB)', excluded),
+        [
+          'Sum (excluding tape+shadow+wand)',
+          for (var i = 0; i < t.length; i++) _fixed(summary.majors.fold<double>(0, (s, m) => s + m.percents[i])),
+        ],
+        [],
+        blockHeader('SUBCATEGORIES (% of transect)'),
+        for (final major in kMajorNames.keys) ...[
+          [majorLabel(major)],
+          for (final c in catalogue)
+            if (tbCategory(c.code).major.db == major) statRow('${c.name} (${c.code})', c),
+        ],
+        [],
+        ['TRANSECT DETAILS', for (final x in t) x.label],
+        perTransect('Tape length (m)', (x) => _meters(x.transect.tapeLengthMeters)),
+        perTransect('Depth start (m)', (x) => x.transect.depthStartM),
+        perTransect('Depth end (m)', (x) => x.transect.depthEndM),
+        perTransect('Uses expert corrections', (x) => yesNo(x.usesExpert)),
+        [],
+      ],
+      ['Transects analyzed', summary.n],
+      ['Hard coral cover (station mean, %)', hc == null ? '' : formatPercent1(hc.mean)],
+      ['Hard coral grade (TB 2019-04)', summary.gradeLine ?? ''],
+      ['Bleached coral (station mean, %)', bleached == null ? '' : formatPercent1(bleached.mean)],
+      for (final flag in summary.flags) ['Flag', flag],
+    ]);
+  }
+
+  /// Issue #8: shares the station sheet through the share sheet (#9 makes
+  /// the organized .zip).
+  static Future<void> shareStationSheet(String filePath, {required bool preliminary}) async {
+    await Share.shareXFiles(
+      [XFile(filePath)],
+      subject: preliminary ? 'ReefSight station summary (PRELIMINARY)' : 'ReefSight station summary',
+      text: preliminary
+          ? '$kPreliminaryStamp. Station cover summary in the CPCe layout.'
+          : 'Station cover summary in the CPCe layout (TB 2017-05), graded on the TB 2019-04 scale.',
+    );
   }
 
   /// Shares the exported CSVs together (colony + session, sub-plan 12).

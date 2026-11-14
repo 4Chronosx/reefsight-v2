@@ -90,7 +90,13 @@ any non-trivial architecture decision.
   pinned CoralscapesV2 SegFormer and labels each point. The app imports `results.json` in one
   transaction (stale frames skipped, mismatches rejected), records `analyzed_on = laptop`, rebuilds
   cover, and shows a cover line on each transect. Format: `../docs/laptop-analysis-exchange-format.md`.
-- **Next: #8**, station summary, grading and CPCe-layout export.
+- **#8 Station summary, grading and CPCe-layout export** (`sub-plans/27-station-summary-and-cpce-export.md`):
+  **done 2026-11-14** (tests; device check pending). Station mean, sample SD and SE of every major
+  category and TB code across analyzed transects (percentages averaged, points not pooled), the TB
+  2019-04 hard coral grade from the mean as shown, % bleached coral, flags (under 3 analyzed, one
+  transect, depth, tape, not analyzed), PRELIMINARY stamp with an indicative grade, a Station summary
+  screen, and a one-file CPCe-layout CSV through the share sheet.
+- **Next: #9**, organized sharing through the iOS share sheet.
 
 ## Explicitly out of scope for now
 

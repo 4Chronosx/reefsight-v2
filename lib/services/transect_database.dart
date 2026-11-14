@@ -15,6 +15,7 @@ import 'health_aggregator.dart';
 import 'point_sampler.dart';
 import 'session_summary.dart';
 import 'station.dart';
+import 'station_summary.dart';
 import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
 import 'transect_cover.dart';
@@ -1280,6 +1281,26 @@ class TransectDatabase {
   Future<CoverComputation> refreshTransectCover(int sessionId) async {
     await _rejectColonyCount(sessionId, 'cover');
     return _db.transaction((txn) => _refreshCover(txn, sessionId));
+  }
+
+  /// Issue #8: the station summary's input -- each of the station's
+  /// transects, by number, with its cover rebuilt as [refreshTransectCover]
+  /// does, all in one transaction, so the counts the CPCe sheet needs
+  /// (frames, all points, excluded) come with the rows and can't be from a
+  /// different moment than them.
+  ///
+  /// Throws [ArgumentError] for an unknown or colony-count station (#3).
+  Future<List<StationTransectCover>> stationCoverInputs(int stationId) async {
+    final station = await stationById(stationId);
+    if (station == null) throw ArgumentError.value(stationId, 'stationId', 'No such station');
+    if (station.surveyType == SurveyType.colonyCount) {
+      throw ArgumentError('Colony-count stations have no cover summary');
+    }
+    final transects = await transectsForStation(stationId);
+    return _db.transaction((txn) async => [
+          for (final t in transects)
+            StationTransectCover(transect: t, cover: await _refreshCover(txn, t.id!)),
+        ]);
   }
 
   static Future<CoverComputation> _refreshCover(Transaction txn, int sessionId) async {

@@ -444,6 +444,12 @@ CREATE TABLE transect_cover (
 - **Checks:** fewer than 3 transects is marked below the TB 2019-04 minimum (with 1 transect there's no
   SD or SE); depth over 6 m and tapes not 50 m long are flagged; preliminary stations are stamped
   PRELIMINARY with an indicative grade.
+- **Settled in #8** (`lib/services/station_summary.dart`; `sub-plans/27-station-summary-and-cpce-export.md`):
+  SD is the sample SD (n − 1), as CPCe's Excel sheets compute it. Only transects whose points are all
+  labeled count toward n; the others are listed as not analyzed, and the minimum of 3 is checked
+  against n. A code missing from a transect is 0 % there. The grade is taken from the mean rounded to
+  one decimal, the value shown. The export is one CSV per station (`PRELIMINARY_` prefixed when
+  preliminary); the organized .zip is #9.
 
 ## 7. Decisions and open items
 

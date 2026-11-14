@@ -378,4 +378,56 @@ void main() {
     expect(pct(CoverLevel.major, 'HC'), closeTo(15 / 24 * 100, 1e-9));
     expect(pct(CoverLevel.major, 'DC'), closeTo(3 / 24 * 100, 1e-9));
   });
+
+  // Issue #8: the station summary's input -- every transect with its cover
+  // rebuilt and its counts, which the cache alone doesn't hold.
+  group('stationCoverInputs', () {
+    late TransectDatabase db;
+    late int station;
+    setUp(() async {
+      db = await TransectDatabase.openInMemoryForTest();
+      station = await db.insertStation(_station());
+    });
+    tearDown(() => db.close());
+
+    Future<int> transect(int number, {required bool labeled}) async {
+      final t = await db.insertSession(_transect(station, seed: 42).copyWith(transectNumber: number));
+      final f = await db.insertFrame(_frame(t, 0));
+      await db.insertFrame(_frame(t, 1, excluded: true));
+      await db.ensureFramePoints(t);
+      if (labeled) {
+        for (final pt in await db.pointsForFrame(f)) {
+          await db.setPointModelLabel(pt.id!, modelClass: 'sand', confidence: 0.9, categoryCode: 'S');
+        }
+      }
+      return t;
+    }
+
+    test('returns each transect by number with its cover and counts', () async {
+      final t2 = await transect(2, labeled: true);
+      final t1 = await transect(1, labeled: false);
+      final inputs = await db.stationCoverInputs(station);
+      expect(inputs.map((i) => i.transect.id), [t1, t2]);
+      expect(inputs[0].cover.isComplete, isFalse);
+      expect(inputs[1].cover.isComplete, isTrue);
+      expect(inputs[1].cover.framesScored, 1);
+      expect(inputs[1].cover.allPoints, 10);
+      expect(inputs[1].cover.countedPoints, 10);
+      // The cache is rebuilt on the way.
+      expect(await db.coverForSession(t2), isNotEmpty);
+    });
+
+    test('a station with no transects has no inputs', () async {
+      expect(await db.stationCoverInputs(station), isEmpty);
+    });
+
+    test('a colony-count station is refused', () async {
+      final colony = await db.insertStation(_station(type: SurveyType.colonyCount));
+      expect(() => db.stationCoverInputs(colony), throwsArgumentError);
+    });
+
+    test('an unknown station is refused', () async {
+      expect(() => db.stationCoverInputs(999), throwsArgumentError);
+    });
+  });
 }
