@@ -18,6 +18,8 @@ import '../services/station_summary.dart' show kNoSummaryYet;
 import '../services/transect_session.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/section_card.dart';
+import '../services/share_package.dart';
+import '../widgets/share_package_sheet.dart';
 import 'app_shell.dart' show routeObserver;
 import 'station_edit_screen.dart';
 import 'station_summary_screen.dart';
@@ -43,6 +45,8 @@ class StationDetailScreen extends StatefulWidget {
     this.buildCapture,
     this.exportForAnalysis,
     this.pickResultsFile,
+    this.documentsPath,
+    this.sharePackage,
   });
 
   /// Named so Live's end handoff can return a station transect's Summary
@@ -77,6 +81,14 @@ class StationDetailScreen extends StatefulWidget {
   /// Issue #7: the text of the results file the diver picks, or `null` when
   /// they cancel; `null` uses the Files picker. Injected in tests.
   final Future<String?> Function()? pickResultsFile;
+
+  /// Issue #9: where frame images and colony photos are stored; `null` is
+  /// the app's documents directory. Injected in tests (no `path_provider`).
+  final Future<String> Function()? documentsPath;
+
+  /// Issue #9: packs the chosen share and opens the share sheet; `null` is
+  /// [runSharePackage]. Injected in tests, which have no share sheet.
+  final SharePackageRunner? sharePackage;
 
   @override
   State<StationDetailScreen> createState() => _StationDetailScreenState();
@@ -121,6 +133,8 @@ Future<void> _exportWithLaptopAnalysis(int stationId, DatabaseOpener openDatabas
   }
   await LaptopAnalysis.share(export.zipPath);
 }
+
+Future<String> _appDocumentsPath() async => (await getApplicationDocumentsDirectory()).path;
 
 /// `FileType.custom` goes through the Files app on iOS (`photo_source.dart`).
 Future<String?> _pickResultsFromFiles() async {
@@ -212,6 +226,23 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
       );
 
   bool _analysisBusy = false;
+
+  /// Issue #9: Share / Save -- the whole station, or with [onlySessionId]
+  /// one transect to start from; the sheet picks the rest.
+  Future<void> _share(BuildContext anchor, Station station, {int? onlySessionId}) => shareSurveyPackage(
+        anchor,
+        onlySessionId: onlySessionId,
+        run: widget.sharePackage,
+        load: () async {
+          final documents = await (widget.documentsPath ?? _appDocumentsPath)();
+          final db = await widget.openDatabase();
+          try {
+            return await ShareSource.forStation(db, station.id!, documentsPath: documents);
+          } finally {
+            await db.close();
+          }
+        },
+      );
 
   Future<void> _exportForAnalysis(Station station) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -335,6 +366,14 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
           appBar: AppBar(
             title: Text(station.code),
             actions: [
+              if (transects.isNotEmpty)
+                Builder(
+                  builder: (anchor) => IconButton(
+                    tooltip: 'Share / Save',
+                    icon: const Icon(Icons.ios_share),
+                    onPressed: () => _share(anchor, station),
+                  ),
+                ),
               IconButton(
                 tooltip: 'Edit station',
                 icon: const Icon(Icons.edit_outlined),
@@ -371,6 +410,7 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                           coverLine: transectCoverLine(data.cover[t.id] ?? const [], t.analyzedOn),
                           onTap: () => _openTransect(station, t),
                           onLongPress: () => _deleteTransect(t),
+                          onShare: (anchor) => _share(anchor, station, onlySessionId: t.id),
                         ),
                       const SizedBox(height: 8),
                       GloveButton(
@@ -524,6 +564,7 @@ class _TransectRow extends StatelessWidget {
     this.coverLine,
     required this.onTap,
     required this.onLongPress,
+    required this.onShare,
   });
 
   final TransectSession transect;
@@ -548,6 +589,10 @@ class _TransectRow extends StatelessWidget {
   }
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+
+  /// Issue #9: Share / Save for this transect alone; the context anchors
+  /// the share sheet on iPad.
+  final void Function(BuildContext anchor) onShare;
 
   @override
   Widget build(BuildContext context) {
@@ -578,6 +623,15 @@ class _TransectRow extends StatelessWidget {
                   ),
                   const Spacer(),
                   Text(status, style: const TextStyle(color: AppColors.unknown, fontSize: 12)),
+                  Builder(
+                    builder: (anchor) => IconButton(
+                      key: Key('share-T${t.transectNumber}'),
+                      tooltip: 'Share / Save T${t.transectNumber}',
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.ios_share, size: 20),
+                      onPressed: () => onShare(anchor),
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 4),

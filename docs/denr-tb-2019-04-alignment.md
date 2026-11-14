@@ -427,6 +427,10 @@ of it.
 **Decided November 14, 2026:** only layer 1 is built for now. The share sheet must keep files organized
 into the station and transect folder layout above. Layer 2 is **deferred**.
 
+**Built in #9 (November 14, 2026):** Share / Save on a station or a transect packs one .zip in this
+layout (`mobile/lib/services/share_package.dart`; `mobile/sub-plans/28-organized-sharing.md`). The
+naming rules and why: `docs/organized-share-package-layout.md`.
+
 **Layer 2 (deferred): in-app Upload to Drive.**
 - **How:** on a station or transect, tap **Upload to Drive**. The first time, the user signs in with
   Google (`google_sign_in`). The app asks only for the **`drive.file`** scope, so it can see only the

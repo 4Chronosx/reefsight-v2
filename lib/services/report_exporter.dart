@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:csv/csv.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'frame_point.dart';
 import 'geo_fix.dart';
 import 'recount_comparison.dart';
 import 'report_data.dart';
@@ -12,6 +13,8 @@ import 'station_checks.dart';
 import 'station_summary.dart';
 import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
+import 'transect_cover.dart';
+import 'transect_frame.dart';
 import 'transect_session.dart';
 
 /// Sub-plan 5 (ui-and-reporting), task 6. Adapted from v1's
@@ -465,6 +468,154 @@ class ReportExporter {
       ['Hard coral grade (TB 2019-04)', summary.gradeLine ?? ''],
       ['Bleached coral (station mean, %)', bleached == null ? '' : formatPercent1(bleached.mean)],
       for (final flag in summary.flags) ['Flag', flag],
+    ]);
+  }
+
+  /// Issue #9: `station_info.csv` in a share package -- the station's own
+  /// fields as label/value rows, then a table with one row per transect in
+  /// the package. A preliminary station starts with the PRELIMINARY stamp
+  /// and a colony-count one with its research-scope note, so the file says
+  /// what it is before anyone reads further.
+  static Future<String> exportStationInfoCsv({
+    required String outputDirectory,
+    required Station station,
+    required List<({TransectSession transect, String folder, int frames})> transects,
+    required DateTime exportedAt,
+  }) {
+    final fix = station.deepEdgeFix;
+    String yesNo(bool? value) => value == null ? '' : (value ? 'yes' : 'no');
+    return _write(outputDirectory, 'station_info.csv', [
+      if (station.surveyType == SurveyType.preliminaryVideo) [kPreliminaryStamp],
+      if (!reportsBulletinCover(station.surveyType)) [kResearchScopeNote],
+      ['Station code', station.code],
+      ['Station name', station.name ?? ''],
+      ['Survey type', station.surveyType.db],
+      ['Frame mode', station.frameMode?.db ?? ''],
+      ['Surveyed on', _isoDay(station.surveyedOn)],
+      ['Site', station.siteName ?? ''],
+      ['Reef zone', station.reefZone?.db ?? ''],
+      ['Depth min (m)', station.depthMinM ?? ''],
+      ['Depth max (m)', station.depthMaxM ?? ''],
+      ['Deep edge lat', fix?.lat ?? ''],
+      ['Deep edge lon', fix?.lon ?? ''],
+      ['Deep edge accuracy (m)', fix?.accuracyM ?? ''],
+      ['Marker placed', yesNo(station.markerPlaced)],
+      ['Observer', station.observerName ?? ''],
+      ['Notes', station.notes ?? ''],
+      ['Exported at', exportedAt.toUtc().toIso8601String()],
+      [],
+      [
+        'Transect',
+        'Folder',
+        'Started At',
+        'Ended At',
+        'Tape Length (m)',
+        'Depth Start (m)',
+        'Depth End (m)',
+        'Capture Source',
+        'Frames',
+        'Analysis Status',
+        'Analyzed On',
+        'Model',
+      ],
+      for (final t in transects)
+        [
+          t.transect.transectNumber == null ? '' : 'T${t.transect.transectNumber}',
+          t.folder,
+          t.transect.startedAt.toIso8601String(),
+          t.transect.endedAt?.toIso8601String() ?? '',
+          _meters(t.transect.tapeLengthMeters),
+          t.transect.depthStartM ?? '',
+          t.transect.depthEndM ?? '',
+          t.transect.captureSource?.db ?? '',
+          t.frames,
+          t.transect.analysisStatus?.db ?? '',
+          t.transect.analyzedOn?.db ?? '',
+          t.transect.modelId ?? '',
+        ],
+    ]);
+  }
+
+  static const List<String> transectCoverCsvHeaders = [
+    'Level',
+    'Code',
+    'Name',
+    'Points',
+    'Total Points',
+    'Percent',
+    'Uses Expert',
+  ];
+
+  /// Issue #9: `transect_cover.csv` -- one transect's % cover, a row per TB
+  /// code and per major category (`transect_cover`'s rows). Empty below the
+  /// header while the transect isn't fully labeled.
+  static Future<String> exportTransectCoverCsv({
+    required String outputDirectory,
+    required List<TransectCoverRow> rows,
+  }) {
+    String name(TransectCoverRow r) => switch (r.level) {
+          CoverLevel.major => kMajorNames[r.categoryCode] ?? '',
+          CoverLevel.code => kTbCategories[r.categoryCode]?.name ?? '',
+        };
+    final ordered = [...rows]..sort((a, b) {
+        final level = a.level.index.compareTo(b.level.index);
+        return level != 0 ? level : a.categoryCode.compareTo(b.categoryCode);
+      });
+    return _write(outputDirectory, 'transect_cover.csv', [
+      transectCoverCsvHeaders,
+      for (final r in ordered)
+        [r.level.db, r.categoryCode, name(r), r.points, r.totalPoints, _fixed(r.percent), r.usesExpert ? 'yes' : 'no'],
+    ]);
+  }
+
+  static const List<String> pointsCsvHeaders = [
+    'Photo',
+    'Meter Mark',
+    'Video Time (ms)',
+    'Point',
+    'X',
+    'Y',
+    'Model Class',
+    'Model Confidence',
+    'Category',
+    'Expert Category',
+    'Expert',
+    'Reviewed At',
+    'Frame Excluded',
+    'Exclude Reason',
+  ];
+
+  /// Issue #9: `points.csv` -- every scored point of one transect, along the
+  /// tape. "Photo" is the photo's name inside the share package
+  /// ([photoNames], by frame id), so a point can be found on its photo; x
+  /// and y are 0-1 across and down the whole image.
+  static Future<String> exportPointsCsv({
+    required String outputDirectory,
+    required List<TransectFrame> frames,
+    required List<FramePoint> points,
+    required Map<int, String> photoNames,
+  }) {
+    final byId = {for (final f in frames) f.id: f};
+    return _write(outputDirectory, 'points.csv', [
+      pointsCsvHeaders,
+      for (final pt in points)
+        if (byId[pt.frameId] case final f?)
+          [
+            photoNames[pt.frameId] ?? '',
+            f.meterMark == null ? '' : _meters(f.meterMark!),
+            f.videoTimeMs ?? '',
+            pt.pointIndex,
+            pt.xNorm.toStringAsFixed(4),
+            pt.yNorm.toStringAsFixed(4),
+            pt.modelClass ?? '',
+            pt.modelConfidence?.toStringAsFixed(2) ?? '',
+            pt.categoryCode ?? '',
+            pt.expertCategoryCode ?? '',
+            pt.expertName ?? '',
+            pt.reviewedAt?.toIso8601String() ?? '',
+            f.excluded ? 'yes' : 'no',
+            f.excludeReason ?? '',
+          ],
     ]);
   }
 

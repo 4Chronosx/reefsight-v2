@@ -96,7 +96,14 @@ any non-trivial architecture decision.
   2019-04 hard coral grade from the mean as shown, % bleached coral, flags (under 3 analyzed, one
   transect, depth, tape, not analyzed), PRELIMINARY stamp with an indicative grade, a Station summary
   screen, and a one-file CPCe-layout CSV through the share sheet.
-- **Next: #9**, organized sharing through the iOS share sheet.
+- **#9 Organized sharing through the iOS share sheet** (`sub-plans/28-organized-sharing.md`):
+  **done 2026-11-14** (tests; device check pending). Share / Save on a station (whole station, or the
+  transects left ticked) and on each transect packs one .zip, `<code>_<day>/` with
+  `station_summary_CPCe.csv` (every transect in), `station_info.csv` and `T<n>/` folders (photos
+  `NNN_mMM.jpg`, `transect_cover.csv`, `points.csv`, optional video), and opens the share sheet.
+  Colony-count and unassigned surveys share their colony and session CSVs and colony photos. Content
+  picker with total size; video off by default. Layout: `../docs/organized-share-package-layout.md`.
+- **Next: #10.**
 
 ## Explicitly out of scope for now
 

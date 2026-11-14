@@ -459,7 +459,10 @@ CREATE TABLE transect_cover (
   cover summaries (#3).
 - **Decided:** diversity is reported both per transect and per station (#10).
 - **Decided:** sharing uses the iOS share sheet with an organized folder layout (#9); the in-app Google
-  Drive upload is deferred.
+  Drive upload is deferred. **Settled in #9** (`lib/services/share_package.dart`;
+  `sub-plans/28-organized-sharing.md`): one .zip per share, root `<code>_<day>` (`_T2` or `_T1_T3` for
+  a subset, `PRELIMINARY_` in front when preliminary); the station summary only with every transect
+  in; photos `NNN_mMM.jpg`; unassigned surveys `<site>_<day>_<HHmm>/transect/`.
 - **Needs CCEF:** the category mapping (#6), the CMEMP/Agos template (#18), and the acceptable
   agreement for validating Virtual and Preliminary modes against the physical frame (#16).
 - **Needs testing:** the Coralscapes model's speed on the iPhone 14 (#11), and whether the Measure app

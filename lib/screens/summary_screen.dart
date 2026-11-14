@@ -17,6 +17,8 @@ import '../services/location_provider.dart';
 import '../services/recount_comparison.dart';
 import '../services/report_data.dart';
 import '../services/report_exporter.dart';
+import '../services/share_package.dart';
+import '../widgets/share_package_sheet.dart';
 import '../services/session_summary.dart';
 import '../services/station.dart';
 import '../services/station_checks.dart';
@@ -1301,8 +1303,30 @@ class _TechnicalTabState extends State<_TechnicalTab> {
     }
   }
 
+  /// Issue #9: an unassigned survey on its own, or a station transect
+  /// through its station with this transect chosen.
+  Future<void> _sharePackage(BuildContext anchor) {
+    final session = widget.report.session;
+    final stationId = session.stationId;
+    return shareSurveyPackage(
+      anchor,
+      onlySessionId: session.id,
+      load: () async {
+        final documents = (await getApplicationDocumentsDirectory()).path;
+        final db = await widget.openDatabase();
+        try {
+          return stationId == null
+              ? await ShareSource.forSession(db, session.id!, documentsPath: documents)
+              : await ShareSource.forStation(db, stationId, documentsPath: documents);
+        } finally {
+          await db.close();
+        }
+      },
+    );
+  }
+
   /// Sub-plan 18 step 6: [withPhotos] adds every colony photo on disk to the
-  /// shared files, as a plain list (no zip dependency).
+  /// shared files, as a plain list (the organized .zip is [_sharePackage]).
   Future<void> _exportAndShare({bool withPhotos = false}) async {
     setState(() {
       _isExporting = true;
@@ -1448,6 +1472,21 @@ class _TechnicalTabState extends State<_TechnicalTab> {
                   )
                 : const Icon(Icons.share),
             label: Text(_isExporting ? 'Exporting...' : 'Export & Share CSV'),
+          ),
+        ),
+        // Issue #9: the same files (and the video, if wanted) as one
+        // organized .zip, so the folder survives Drive, AirDrop and email.
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: SizedBox(
+            height: 52,
+            child: Builder(
+              builder: (anchor) => OutlinedButton.icon(
+                onPressed: _isExporting ? null : () => _sharePackage(anchor),
+                icon: const Icon(Icons.folder_zip_outlined),
+                label: const Text('Share / Save (.zip)'),
+              ),
+            ),
           ),
         ),
         if (widget.photos.contextPaths.isNotEmpty)
