@@ -110,7 +110,16 @@ any non-trivial architecture decision.
   `genus_tags`, diversity per transect and per station graded A–D on the summary screen and in the
   CPCe sheet, and `genus_tags.csv` per transect in the share package. Reasoning:
   `../docs/expert-review-and-tau-diversity.md`.
-- **Next: #11.**
+- **#11 Core ML conversion and iPhone 14 speed test for the Coralscapes segmenter**
+  (`sub-plans/30-coreml-speed-test.md`): **tooling done 2026-11-14** (Dart tests; Swift unbuilt on
+  Codemagic; notebook 29 written, not run; **not measured yet**). Notebook 29 converts the pinned
+  SegFormer at 1024 and 512 (FP16, optionally int8 weights) and packs a benchmark zip. A dev screen
+  (Settings → Diagnostics → Core ML benchmark) times it per compute-unit setting, reads the compute
+  plan and memory, runs a 20 min heat and battery test, and shares class maps back for the notebook's
+  fidelity check. **License finding:** the weights are fine-tuned from `nvidia/mit-b5` (NVIDIA license,
+  research or evaluation only), so shipping them in the app (#12) is not cleared. Method, thresholds
+  and license: `../docs/coralscapes-coreml-speed-test.md`.
+- **Next: run #11 on the phone, then decide #12.**
 
 ## Explicitly out of scope for now
 

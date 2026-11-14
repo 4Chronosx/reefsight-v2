@@ -313,6 +313,8 @@ The report gives:
     The SegFormer is the only model in this mode.
   - **Caveats:** the SegFormer is much heavier per frame than YOLO, so heat and battery need checking
     (a heat warning appeared on Oct 4).
+    **Checked with #11:** the weights' base encoder `nvidia/mit-b5` is research/evaluation-only
+    (NVIDIA license), which blocks shipping them until clarified (`docs/coralscapes-coreml-speed-test.md` §4).
     Shipping the weights in the app may carry share-alike terms (the dataset is treated as
     CC BY-SA 4.0), so confirm the model's own license. Red Sea training data means local validation
     is needed. Not feasible before November 15.
@@ -467,6 +469,12 @@ naming rules and why: `docs/organized-share-package-layout.md`.
   bridge is built: the bridge is for the cover segmenter only, and YOLO models stay on the plugin. The
   bridge goes ahead only if the on-device speed test is acceptable. Each transect records where it
   was analyzed (`analyzed_on`: phone or laptop).
+  **Speed test tooling built with #11** (2026-11-14; not measured yet): notebook 29 converts the model
+  and a dev screen times it on the phone, against thresholds fixed beforehand. **The license check
+  found a second gate:** the weights are fine-tuned from `nvidia/mit-b5`, whose NVIDIA Source Code
+  License allows research or evaluation use only, so shipping them in the app needs clarification
+  from EPFL-ECEO or NVIDIA, or a retrained model, whatever the speed. Method, thresholds and license:
+  `docs/coralscapes-coreml-speed-test.md`.
 - **Colony-count mode is kept as a third survey type,** alongside Photo transect and Preliminary
   (video). It uses YOLOv8n-seg, BoT-SORT, the bleaching classifier and the `colonies` table. It's a
   research mode outside the bulletins: its results (colony counts, bleaching prevalence) are reported

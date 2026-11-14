@@ -6,6 +6,7 @@ import '../services/classification_policy.dart';
 import '../services/crop_geometry.dart';
 import '../services/model_assets.dart';
 import '../widgets/section_card.dart';
+import 'coreml_benchmark_screen.dart';
 
 /// Sub-plan 6 (ui-ux-overhaul), step 7: Settings/About -- a diagnostics
 /// toggle for Live's debug overlay, an About section disclosing which model
@@ -120,6 +121,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ValueListenableBuilder<ClassificationThresholds>(
                   valueListenable: AppSettings.instance.classificationThresholds,
                   builder: (context, thresholds, _) => _ThresholdSettings(thresholds),
+                ),
+                // Issue #11: dev-only speed test for the Coralscapes segmenter.
+                ListTile(
+                  key: const Key('settings-coreml-benchmark'),
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Core ML benchmark'),
+                  subtitle: const Text('Speed test for the Coralscapes cover segmenter (issue #11).'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(builder: (_) => const CoreMlBenchmarkScreen()),
+                  ),
                 ),
               ],
             ),
