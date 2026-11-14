@@ -324,9 +324,14 @@ are both TB codes and major categories, so without it one transect couldn't hold
 | percent | REAL NOT NULL | points ÷ total_points × 100 |
 | uses_expert | INTEGER NOT NULL | 1 if computed with expert corrections |
 
-### `genus_tags` (new, added with #10)
+### `genus_tags` (schema v13, added with #10)
 Expert tags of genus groups (TAUs). Diversity is reported both per transect (distinct TAUs in each
-transect) and per station (distinct TAUs across all transects). The station figure gets the A–D grade.
+transect) and per station (distinct TAUs across all transects). The station figure gets the A–D grade
+(A >26 · B >22–26 · C >18–22 · D 0–18; no tags means no grade, not D). One row per TAU per frame
+(`UNIQUE (session_id, frame_id, tau_code)`), and per transect for a TAU seen on the tape but in no
+photo (`frame_id` NULL, partial unique index `idx_genus_tags_tape`). Replacing a frame's photo drops
+its tags; moving its corners keeps them. Codes are TB 2019-04 Table 3's (`tau_catalogue.dart`), kept
+apart from the TB 2017-05 life-form codes a point carries.
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -430,7 +435,18 @@ CREATE TABLE transect_cover (
   uses_expert INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, category_code)
 );
--- genus_tags: added with #10 (diversity). drive_uploads: deferred with the in-app Drive upload.
+-- v13 (#10, diversity):
+CREATE TABLE genus_tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  station_id INTEGER NOT NULL REFERENCES stations(id),
+  session_id INTEGER NOT NULL REFERENCES transect_sessions(id),
+  frame_id INTEGER REFERENCES transect_frames(id),   -- NULL: seen on the tape, in no photo
+  tau_code TEXT NOT NULL,
+  tagged_by TEXT, tagged_at TEXT,
+  UNIQUE (session_id, frame_id, tau_code)
+);
+CREATE UNIQUE INDEX idx_genus_tags_tape ON genus_tags(session_id, tau_code) WHERE frame_id IS NULL;
+-- drive_uploads: deferred with the in-app Drive upload.
 ```
 
 ## 6. Station summary: how it's calculated

@@ -103,7 +103,14 @@ any non-trivial architecture decision.
   `NNN_mMM.jpg`, `transect_cover.csv`, `points.csv`, optional video), and opens the share sheet.
   Colony-count and unassigned surveys share their colony and session CSVs and colony photos. Content
   picker with total size; video off by default. Layout: `../docs/organized-share-package-layout.md`.
-- **Next: #10.**
+- **#10 Expert review: point corrections and genus-group diversity**
+  (`sub-plans/29-expert-review-and-diversity.md`): **done 2026-11-14** (tests; device check pending).
+  Expert review screen per transect (points on the photo; accept, change or clear a label; reviewer
+  name asked once), TAU tags per photo and on the tape (TB 2019-04 Table 3), schema v13
+  `genus_tags`, diversity per transect and per station graded A–D on the summary screen and in the
+  CPCe sheet, and `genus_tags.csv` per transect in the share package. Reasoning:
+  `../docs/expert-review-and-tau-diversity.md`.
+- **Next: #11.**
 
 ## Explicitly out of scope for now
 

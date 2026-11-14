@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/screens/frame_corner_editor_screen.dart';
 import 'package:reefsight_mobile/screens/photo_import_screen.dart';
 import 'package:reefsight_mobile/screens/station_transect_setup_screen.dart';
+import 'package:reefsight_mobile/services/frame_point.dart';
 import 'package:reefsight_mobile/services/photo_import.dart';
 import 'package:reefsight_mobile/services/photo_metadata.dart';
 import 'package:reefsight_mobile/services/station.dart';
@@ -205,6 +206,47 @@ void main() {
     frames = (await tester.runAsync(() => db.framesForSession(sessionId)))!;
     expect(frames[1].corners, frames[0].corners);
     expect(frames[1].cornerSource, CornerSource.copied);
+  });
+
+  // Issue #10: moving corners resamples the points, so corrections go.
+  testWidgets('corner editor: moving corners on a reviewed frame asks before discarding corrections',
+      (tester) async {
+    await sized(tester);
+    const corners = <NormPoint>[(x: 0.1, y: 0.1), (x: 0.9, y: 0.1), (x: 0.9, y: 0.9), (x: 0.1, y: 0.9)];
+    late int frameId;
+    await tester.runAsync(() async {
+      frameId = await db.insertFrame(TransectFrame(
+        sessionId: sessionId,
+        meterMark: 0,
+        imagePath: 'transect_photos/x0.jpg',
+        source: FrameSource.imported,
+        widthPx: 4000,
+        heightPx: 3000,
+        corners: corners,
+        cornerSource: CornerSource.manual,
+      ));
+      await db.insertFramePoints([FramePoint(frameId: frameId, pointIndex: 0, xNorm: .5, yNorm: .5, categoryCode: 'S')]);
+      final point = (await db.pointsForFrame(frameId)).single.id!;
+      await db.setExpertCategory(point, 'CM', by: 'Expert', at: DateTime.utc(2026, 11, 16));
+    });
+    await tester.pumpWidget(MaterialApp(
+      home: FrameCornerEditorScreen(db: db, sessionId: sessionId, documentsDirectory: docs.path, title: 'T1'),
+    ));
+    await settleIo(tester);
+
+    await tester.drag(find.byKey(const ValueKey('corner-0')), const Offset(-20, -20));
+    await tester.pumpAndSettle();
+    await settleIo(tester, () => tester.tap(find.text('Save corners')), find.text('Discard expert corrections?'));
+    expect(find.textContaining('correction on 1 of its points'), findsOneWidget);
+    await tester.tap(find.text('Keep corners'));
+    await tester.pumpAndSettle();
+    var points = (await tester.runAsync(() => db.pointsForFrame(frameId)))!;
+    expect(points.single.expertCategoryCode, 'CM', reason: 'kept');
+
+    await settleIo(tester, () => tester.tap(find.text('Save corners')), find.text('Move corners'));
+    await settleIo(tester, () => tester.tap(find.text('Move corners')));
+    points = (await tester.runAsync(() => db.pointsForFrame(frameId)))!;
+    expect(points, isEmpty, reason: 'points go with the old corners');
   });
 
   testWidgets('corner editor: no frame visible excludes the photo', (tester) async {

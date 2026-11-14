@@ -135,8 +135,42 @@ class _FrameCornerEditorScreenState extends State<FrameCornerEditorScreen> {
       ));
       return;
     }
+    // Issue #10: moving the corners places new points, so an expert's
+    // corrections on this frame would go with the old ones -- ask first.
+    final old = frame.corners;
+    final moved = old == null || !_sameCorners(old, ordered);
+    if (moved && !await _confirmLosingCorrections(frame)) return;
     // One transaction: it also lifts a "no frame visible" exclusion.
     await _write(() => widget.db.updateFrameCorners(frame.id!, ordered, _source));
+  }
+
+  static bool _sameCorners(List<NormPoint> a, List<NormPoint> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+    }
+    return true;
+  }
+
+  /// `true` to go ahead: no corrections on the frame, or the user agreed.
+  Future<bool> _confirmLosingCorrections(TransectFrame frame) async {
+    final corrected = (await widget.db.pointsForFrame(frame.id!)).where((p) => p.expertCategoryCode != null).length;
+    if (corrected == 0 || !mounted) return mounted;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Discard expert corrections?'),
+        content: Text(
+          'Moving the corners places new scoring points on this photo. The expert '
+          'correction${corrected == 1 ? '' : 's'} on $corrected of its points will be lost.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Keep corners')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Move corners')),
+        ],
+      ),
+    );
+    return ok ?? false;
   }
 
   Future<void> _markNoFrame() async {

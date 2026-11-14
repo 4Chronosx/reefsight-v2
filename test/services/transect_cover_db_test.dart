@@ -57,11 +57,11 @@ void main() {
     setUp(() async => dir = await Directory.systemTemp.createTemp('reefsight_v12_'));
     tearDown(() => dir.delete(recursive: true));
 
-    test('a fresh install is v12, with the cover level in the key', () async {
+    test('a fresh install has the cover level in the key (v12)', () async {
       await (await TransectDatabase.open(dir.path)).close();
       final raw = await openDatabase(p.join(dir.path, 'reefsight.db'), singleInstance: false);
       addTearDown(raw.close);
-      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 12);
+      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 13);
       final columns = {for (final r in await raw.rawQuery('PRAGMA table_info(transect_cover)')) r['name']: r['pk']};
       expect(columns['level'], isNot(0));
       expect(columns['category_code'], isNot(0));
@@ -72,6 +72,8 @@ void main() {
       await (await TransectDatabase.open(dir.path)).close();
       // Turn the file back into a v11 one, with a v11-shaped cover row.
       final raw = await openDatabase(path, singleInstance: false);
+      await raw.execute('DROP INDEX idx_genus_tags_tape');
+      await raw.execute('DROP TABLE genus_tags');
       await raw.execute('DROP TABLE transect_cover');
       await raw.execute('''
         CREATE TABLE transect_cover (

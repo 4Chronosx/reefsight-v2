@@ -131,6 +131,7 @@ void main() {
         for (final t in ['T1', 'T2', 'T3']) ...[
           'ALG-S1_2026-11-15/$t/transect_cover.csv',
           'ALG-S1_2026-11-15/$t/points.csv',
+          'ALG-S1_2026-11-15/$t/genus_tags.csv',
           'ALG-S1_2026-11-15/$t/photos/001_m00.jpg',
           'ALG-S1_2026-11-15/$t/photos/002_m01.jpg',
         ],
@@ -149,6 +150,36 @@ void main() {
       final hc = rows.singleWhere((r) => r[0] == 'major' && r[1] == 'HC');
       expect(hc[2], 'Hard coral');
       expect(hc[5], '50.00');
+    });
+
+    // Issue #10: the expert's tags per transect, and diversity in the sheet.
+    test('genus_tags.csv per transect, and the station sheet carries diversity', () async {
+      final at = DateTime.utc(2026, 11, 16, 3);
+      final frame = (await db.framesForSession(t1)).first;
+      await db.setFrameTaus(frame.id!, {'PORM', 'ACB'}, by: 'Expert', at: at);
+      await db.setTransectTaus(t3, {'HEL'}, by: 'Expert', at: at);
+      final source = await ShareSource.forStation(db, stationId, documentsPath: documents.path);
+      expect(source.diversity!.stationCount, 3);
+      final entries = _read(await writeShareZip(source, source.defaultOptions(), outputDirectory: output));
+
+      final t1Tags = _csv(entries['ALG-S1_2026-11-15/T1/genus_tags.csv']!);
+      expect(t1Tags.skip(1).map((r) => (r[0], r[2])), [('photos/001_m00.jpg', 'ACB'), ('photos/001_m00.jpg', 'PORM')]);
+      expect(_csv(entries['ALG-S1_2026-11-15/T2/genus_tags.csv']!), hasLength(1));
+      expect(_csv(entries['ALG-S1_2026-11-15/T3/genus_tags.csv']!)[1][0], '(on tape, no photo)');
+
+      final sheet = _csv(entries['ALG-S1_2026-11-15/station_summary_CPCe.csv']!);
+      expect(sheet.firstWhere((r) => r.first == 'Diversity (station, TAUs)')[1], '3');
+    });
+
+    test('genus tags alone (nothing analyzed) still put the sheet in, with diversity', () async {
+      final bare = await db.insertStation(_station(code: 'ALG-S9'));
+      final t = await db.insertSession(_transect(bare, 1));
+      await db.setTransectTaus(t, {'PORM'}, by: 'Expert', at: DateTime.utc(2026, 11, 16));
+      final source = await ShareSource.forStation(db, bare, documentsPath: documents.path);
+      expect(source.summary?.n, 0);
+      final entries = _read(await writeShareZip(source, source.defaultOptions(), outputDirectory: output));
+      final sheet = _csv(entries.entries.firstWhere((e) => e.key.endsWith('station_summary_CPCe.csv')).value);
+      expect(sheet.firstWhere((r) => r.first == 'Diversity (station, TAUs)')[1], '1');
     });
 
     test('points.csv names each point\'s photo as it is in the zip', () async {

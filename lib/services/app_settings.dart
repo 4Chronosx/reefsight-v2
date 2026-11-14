@@ -46,4 +46,10 @@ class AppSettings {
   final classificationThresholds = ValueNotifier<ClassificationThresholds>(
     ClassificationThresholds.defaults,
   );
+
+  /// Issue #10: who is reviewing points and tagging genus groups, stored
+  /// with each correction and tag. Asked on the first change in a review
+  /// (pre-filled from the station's observer) and kept until relaunch, so an
+  /// expert reviewing a station is asked once.
+  final reviewerName = ValueNotifier<String>('');
 }

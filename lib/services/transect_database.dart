@@ -10,12 +10,14 @@ import 'cover_calculator.dart';
 import 'db_enum.dart';
 import 'device_checks.dart';
 import 'frame_point.dart';
+import 'genus_tag.dart';
 import 'geo_fix.dart';
 import 'health_aggregator.dart';
 import 'point_sampler.dart';
 import 'session_summary.dart';
 import 'station.dart';
 import 'station_summary.dart';
+import 'tau_catalogue.dart';
 import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
 import 'transect_cover.dart';
@@ -46,6 +48,7 @@ class TransectDatabase {
   static const _pointsTable = 'frame_points';
   static const _categoryMapTable = 'category_map';
   static const _coverTable = 'transect_cover';
+  static const _genusTagsTable = 'genus_tags';
 
   /// Bumped from 1 -> 2 when `site_name`/`observer_name` were added to
   /// `transect_sessions` (sub-plan 5, task 2), and 2 -> 3 when `video_path`
@@ -69,7 +72,8 @@ class TransectDatabase {
   /// category map, so a change to `coralscapes_mapping.dart` ships with a
   /// version bump -- that runs the re-seed once, inside sqflite's
   /// version-change transaction, instead of racing on every open.
-  static const _schemaVersion = 12;
+  /// 12 -> 13 added `genus_tags` (#10: expert TAU tags for diversity).
+  static const _schemaVersion = 13;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -165,6 +169,9 @@ class TransectDatabase {
     }
     await db.execute(_coverTableSql);
     await db.execute(_stationTransectIndexSql);
+    for (final sql in _genusTagsSql) {
+      await db.execute(sql);
+    }
     await _seedCategoryMap(db, kCoralscapesModelId, coralscapesMapping());
   }
 
@@ -242,6 +249,11 @@ class TransectDatabase {
       await db.execute('DROP TABLE IF EXISTS $_coverTable');
       await db.execute(_coverTableSql);
     }
+    if (oldVersion < 13) {
+      for (final sql in _genusTagsSql) {
+        await db.execute(sql);
+      }
+    }
     await _seedCategoryMap(db, kCoralscapesModelId, coralscapesMapping());
   }
 
@@ -299,8 +311,8 @@ class TransectDatabase {
   ''';
 
   /// v11's tables that hang off a transect, in dependency order. `genus_tags`
-  /// comes with #10 and `drive_uploads` is deferred with the in-app Drive
-  /// upload, so neither is here. No `ON DELETE CASCADE` (matching
+  /// came with #10 in v13 ([_genusTagsSql]) and `drive_uploads` is deferred
+  /// with the in-app Drive upload, so neither is here. No `ON DELETE CASCADE` (matching
   /// `tracked_colonies`): [deleteSession] removes the children explicitly.
   static const _v11ChildTablesSql = [
     '''
@@ -370,6 +382,31 @@ class TransectDatabase {
       PRIMARY KEY (session_id, level, category_code)
     )
   ''';
+
+  /// v13 (#10): an expert's genus-group (TAU) tags, one per TAU per frame
+  /// (`UNIQUE`), or per transect for one seen on the tape but in no photo
+  /// (`frame_id` NULL -- SQLite's UNIQUE treats NULLs as distinct, hence the
+  /// partial index). `station_id` is the transect's, filled in by
+  /// [setFrameTaus] and [setTransectTaus], never by the caller; a transect
+  /// never changes station.
+  static const _genusTagsSql = [
+    '''
+    CREATE TABLE $_genusTagsTable (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      station_id INTEGER NOT NULL REFERENCES $_stationsTable(id),
+      session_id INTEGER NOT NULL REFERENCES $_sessionsTable(id),
+      frame_id INTEGER REFERENCES $_framesTable(id),
+      tau_code TEXT NOT NULL,
+      tagged_by TEXT,
+      tagged_at TEXT,
+      UNIQUE (session_id, frame_id, tau_code)
+    )
+    ''',
+    '''
+    CREATE UNIQUE INDEX idx_genus_tags_tape
+      ON $_genusTagsTable(session_id, tau_code) WHERE frame_id IS NULL
+    ''',
+  ];
 
   /// v10: the classifier settings a session ran with -- names match
   /// `TransectSession.toMap` and `ClassificationThresholds.toColumns`.
@@ -616,6 +653,7 @@ class TransectDatabase {
           whereArgs: [sessionId],
         );
         if (rows.isEmpty) return null;
+        await txn.delete(_genusTagsTable, where: 'session_id = ?', whereArgs: [sessionId]);
         await txn.rawDelete('''
           DELETE FROM $_pointsTable
           WHERE frame_id IN (SELECT id FROM $_framesTable WHERE session_id = ?)
@@ -887,6 +925,8 @@ class TransectDatabase {
       );
       final replaced = rows.isEmpty ? null : TransectFrame.fromMap(rows.single);
       if (replaced != null) {
+        // Tags were made on the old photo (#10, D7); tape tags stay.
+        await txn.delete(_genusTagsTable, where: 'frame_id = ?', whereArgs: [replaced.id]);
         await txn.delete(_pointsTable, where: 'frame_id = ?', whereArgs: [replaced.id]);
         await txn.delete(_framesTable, where: 'id = ?', whereArgs: [replaced.id]);
         // The cached cover (#7) was worked out from the old image's points:
@@ -948,6 +988,7 @@ class TransectDatabase {
 
       final removed = [for (final f in existing.values) if (!keptIds.contains(f.id)) f];
       for (final f in removed) {
+        await txn.delete(_genusTagsTable, where: 'frame_id = ?', whereArgs: [f.id]);
         await txn.delete(_pointsTable, where: 'frame_id = ?', whereArgs: [f.id]);
         await txn.delete(_framesTable, where: 'id = ?', whereArgs: [f.id]);
       }
@@ -1204,6 +1245,22 @@ class TransectDatabase {
           'expert_name': reviewer,
           'reviewed_at': at.toUtc().toIso8601String(),
         },
+        where: 'id = ?',
+        whereArgs: [pointId],
+      );
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+    });
+  }
+
+  /// Undoes [setExpertCategory] (#10): the model's label counts again. The
+  /// transect's cached cover goes in the same transaction. Throws
+  /// [ArgumentError] for an unknown point.
+  Future<void> clearExpertCategory(int pointId) async {
+    await _db.transaction((txn) async {
+      final sessionId = await _sessionOfPoint(txn, pointId);
+      await txn.update(
+        _pointsTable,
+        {'expert_category_code': null, 'expert_name': null, 'reviewed_at': null},
         where: 'id = ?',
         whereArgs: [pointId],
       );
@@ -1531,6 +1588,124 @@ class TransectDatabase {
     );
     return rows.map(TransectCoverRow.fromMap).toList(growable: false);
   }
+
+  /// Issue #10: makes the TAUs tagged on frame [frameId] exactly [tauCodes].
+  /// A code already tagged keeps its row (who first tagged it, and when);
+  /// new codes are tagged [by] at [at]; codes not listed are untagged. Cover
+  /// is unaffected: tags are for diversity only.
+  ///
+  /// Throws [ArgumentError], before writing, for a code outside TB 2019-04
+  /// Table 3 (`tau_catalogue.dart`), a blank tagger, an unknown frame, or a
+  /// frame whose transect is in no station or is colony count (#3).
+  Future<void> setFrameTaus(int frameId, Set<String> tauCodes, {required String by, required DateTime at}) =>
+      _setTaus(null, frameId, tauCodes, by: by, at: at);
+
+  /// [setFrameTaus] for the TAUs seen along transect [sessionId]'s tape but
+  /// in none of its photos (`frame_id` NULL). The frames' tags are untouched.
+  Future<void> setTransectTaus(int sessionId, Set<String> tauCodes, {required String by, required DateTime at}) =>
+      _setTaus(sessionId, null, tauCodes, by: by, at: at);
+
+  /// The checks read inside the same transaction as the writes, so a frame
+  /// or transect deleted meanwhile is refused as unknown rather than
+  /// half-written.
+  Future<void> _setTaus(int? sessionIdOrNull, int? frameId, Set<String> tauCodes,
+      {required String by, required DateTime at}) async {
+    final codes = {for (final c in tauCodes) c.trim()};
+    for (final code in codes) {
+      tau(code);
+    }
+    final tagger = by.trim();
+    if (tagger.isEmpty) throw ArgumentError('A tagger name is required');
+
+    await _db.transaction((txn) async {
+      var sessionId = sessionIdOrNull;
+      if (frameId != null) {
+        final frames = await txn.query(_framesTable, columns: ['session_id'], where: 'id = ?', whereArgs: [frameId]);
+        if (frames.isEmpty) throw ArgumentError.value(frameId, 'frameId', 'No such frame');
+        sessionId = frames.single['session_id'] as int;
+      }
+      final sessions = await txn.rawQuery('''
+        SELECT s.station_id AS station_id, st.survey_type AS type
+        FROM $_sessionsTable s LEFT JOIN $_stationsTable st ON st.id = s.station_id
+        WHERE s.id = ?
+      ''', [sessionId]);
+      if (sessions.isEmpty) throw ArgumentError.value(sessionId, 'sessionId', 'No such transect');
+      final stationId = sessions.single['station_id'] as int?;
+      if (stationId == null) throw ArgumentError('Transect $sessionId is in no station: genus tags need one');
+      if (sessions.single['type'] == SurveyType.colonyCount.db) {
+        throw ArgumentError('Colony-count transect $sessionId takes no genus tags (research mode, #3)');
+      }
+
+      final scope = frameId == null ? 'session_id = ? AND frame_id IS NULL' : 'session_id = ? AND frame_id = ?';
+      final scopeArgs = [sessionId, ?frameId];
+      final existing = {
+        for (final r in await txn.query(_genusTagsTable, columns: ['tau_code'], where: scope, whereArgs: scopeArgs))
+          r['tau_code'] as String,
+      };
+      for (final gone in existing.difference(codes)) {
+        await txn.delete(_genusTagsTable, where: '$scope AND tau_code = ?', whereArgs: [...scopeArgs, gone]);
+      }
+      final batch = txn.batch();
+      for (final code in codes.difference(existing)) {
+        final tag = GenusTag(
+          stationId: stationId,
+          sessionId: sessionId!,
+          frameId: frameId,
+          tauCode: code,
+          taggedBy: tagger,
+          taggedAt: at,
+        );
+        batch.insert(_genusTagsTable, tag.toMap()..remove('id'));
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// A transect's tags: tape tags first, then by frame, then by code.
+  Future<List<GenusTag>> genusTagsForSession(int sessionId) async {
+    final rows = await _db.query(
+      _genusTagsTable,
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+      orderBy: 'frame_id, tau_code',
+    );
+    return rows.map(GenusTag.fromMap).toList(growable: false);
+  }
+
+  /// Every tag on the station's transects, for its diversity (#10).
+  Future<List<GenusTag>> genusTagsForStation(int stationId) async {
+    final rows = await _db.query(
+      _genusTagsTable,
+      where: 'station_id = ?',
+      whereArgs: [stationId],
+      orderBy: 'session_id, frame_id, tau_code',
+    );
+    return rows.map(GenusTag.fromMap).toList(growable: false);
+  }
+
+  /// Issue #10: who last corrected a point or tagged a genus group on the
+  /// station, by time -- the review screen's guess at the reviewer's name
+  /// after a relaunch, when the in-memory setting is empty. `null` before
+  /// any review.
+  Future<String?> lastReviewerForStation(int stationId) async {
+    final rows = await _db.rawQuery('''
+      SELECT name FROM (
+        SELECT p.expert_name AS name, p.reviewed_at AS at
+        FROM $_pointsTable p
+        JOIN $_framesTable f ON f.id = p.frame_id
+        JOIN $_sessionsTable s ON s.id = f.session_id
+        WHERE s.station_id = ? AND p.expert_name IS NOT NULL AND p.reviewed_at IS NOT NULL
+        UNION ALL
+        SELECT tagged_by AS name, tagged_at AS at
+        FROM $_genusTagsTable
+        WHERE station_id = ? AND tagged_by IS NOT NULL AND tagged_at IS NOT NULL
+      ) ORDER BY at DESC LIMIT 1
+    ''', [stationId, stationId]);
+    return rows.isEmpty ? null : rows.single['name'] as String?;
+  }
+
+  /// The underlying connection, for tests that check constraints in raw SQL.
+  Database get rawDatabaseForTest => _db;
 
   Future<void> close() => _ignoreClose ? Future.value() : _db.close();
 

@@ -473,7 +473,11 @@ naming rules and why: `docs/organized-share-package-layout.md`.
   separately and **never mixed into the bulletin cover summaries**.
 - **Diversity is reported both per transect and per station:** the number of distinct genus groups
   (TAUs) in each transect, and across the whole station. The station figure is what TB 2019-04's
-  diversity grade (A–D) is applied to, until CCEF confirms how they count it.
+  diversity grade (A–D) is applied to, until CCEF confirms how they count it. **Built with #10**
+  (2026-11-14): an expert tags TAUs per photo, or on the tape when in no photo; diversity counts tags
+  only, so it doesn't wait for the cover analysis, and a station with no tags has no grade (not D).
+  The same review screen lets the expert accept, change or clear each point's label; corrections
+  feed cover (`uses_expert`). Reasoning in `docs/expert-review-and-tau-diversity.md`.
 - **Still to settle with CCEF:** the class-to-category mapping, the CMEMP/Agos template, and the
   agreement needed to accept Virtual and Preliminary modes against the physical frame.
 

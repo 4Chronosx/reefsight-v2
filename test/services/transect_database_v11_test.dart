@@ -84,9 +84,10 @@ void main() {
 
       final raw = await openDatabase(p.join(dir.path, 'reefsight.db'), singleInstance: false);
       addTearDown(raw.close);
-      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 12);
+      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 13);
       expect(await _tableNames(raw), containsAll(_v11Tables));
-      expect(await _tableNames(raw), isNot(contains('genus_tags')));
+      // genus_tags came with v13 (#10, genus_tags_db_test.dart).
+      expect(await _tableNames(raw), contains('genus_tags'));
       expect(await _tableNames(raw), isNot(contains('drive_uploads')));
       final index = await raw.rawQuery(
         "SELECT sql FROM sqlite_master WHERE name = 'idx_sessions_station_transect'",

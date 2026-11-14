@@ -4,18 +4,21 @@ import 'package:path_provider/path_provider.dart';
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/report_exporter.dart';
+import '../services/station_diversity.dart';
 import '../services/station_summary.dart';
 import '../widgets/glove_button.dart';
 import '../widgets/section_card.dart';
 import 'station_edit_screen.dart' show FlagLine;
 
-/// Writes the station's CPCe sheet and opens the share sheet.
-typedef StationSheetExporter = Future<void> Function(StationCoverSummary summary);
+/// Writes the station's CPCe sheet (with its diversity, #10) and opens the
+/// share sheet.
+typedef StationSheetExporter = Future<void> Function(StationCoverSummary summary, StationDiversity? diversity);
 
-Future<void> _exportAndShare(StationCoverSummary summary) async {
+Future<void> _exportAndShare(StationCoverSummary summary, StationDiversity? diversity) async {
   final path = await ReportExporter.exportStationCpceCsv(
     outputDirectory: (await getTemporaryDirectory()).path,
     summary: summary,
+    diversity: diversity,
   );
   await ReportExporter.shareStationSheet(path, preliminary: summary.isPreliminary);
 }
@@ -44,26 +47,35 @@ class StationSummaryScreen extends StatefulWidget {
   State<StationSummaryScreen> createState() => _StationSummaryScreenState();
 }
 
+typedef _Loaded = ({StationCoverSummary summary, StationDiversity diversity});
+
 class _StationSummaryScreenState extends State<StationSummaryScreen> {
-  late final Future<StationCoverSummary> _summary = _load();
+  late final Future<_Loaded> _summary = _load();
   bool _exporting = false;
 
-  Future<StationCoverSummary> _load() async {
+  Future<_Loaded> _load() async {
     final db = await widget.openDatabase();
     try {
       final station = await db.stationById(widget.stationId);
       if (station == null) throw StateError('Station not found');
-      return StationCoverSummary.compute(station, await db.stationCoverInputs(widget.stationId));
+      final summary = StationCoverSummary.compute(station, await db.stationCoverInputs(widget.stationId));
+      // Issue #10: over every transect, analyzed or not -- tags don't wait
+      // for cover.
+      final diversity = StationDiversity.compute(
+        await db.transectsForStation(widget.stationId),
+        await db.genusTagsForStation(widget.stationId),
+      );
+      return (summary: summary, diversity: diversity);
     } finally {
       await db.close();
     }
   }
 
-  Future<void> _export(StationCoverSummary summary) async {
+  Future<void> _export(StationCoverSummary summary, StationDiversity diversity) async {
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _exporting = true);
     try {
-      await (widget.exportSheet ?? _exportAndShare)(summary);
+      await (widget.exportSheet ?? _exportAndShare)(summary, diversity);
     } catch (error) {
       messenger.showSnackBar(SnackBar(content: Text('Export failed: $error')));
     } finally {
@@ -73,10 +85,10 @@ class _StationSummaryScreenState extends State<StationSummaryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<StationCoverSummary>(
+    return FutureBuilder<_Loaded>(
       future: _summary,
       builder: (context, snapshot) {
-        final summary = snapshot.data;
+        final summary = snapshot.data?.summary;
         return Scaffold(
           appBar: AppBar(title: Text(summary == null ? 'Station summary' : 'Summary · ${summary.station.code}')),
           body: SafeArea(
@@ -86,14 +98,14 @@ class _StationSummaryScreenState extends State<StationSummaryScreen> {
                         ? Text('Could not load: ${snapshot.error}')
                         : const CircularProgressIndicator(),
                   )
-                : _body(summary),
+                : _body(summary, snapshot.data!.diversity),
           ),
         );
       },
     );
   }
 
-  Widget _body(StationCoverSummary summary) {
+  Widget _body(StationCoverSummary summary, StationDiversity diversity) {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -102,7 +114,7 @@ class _StationSummaryScreenState extends State<StationSummaryScreen> {
           const SizedBox(height: 16),
         ],
         if (summary.n == 0) ...[
-          const Text(kNoSummaryYet, style: TextStyle(fontSize: 14)),
+          const Text(kNoCoverYet, style: TextStyle(fontSize: 14)),
           const SizedBox(height: 12),
         ] else ...[
           _HardCoralCard(summary: summary),
@@ -110,6 +122,8 @@ class _StationSummaryScreenState extends State<StationSummaryScreen> {
         ],
         for (final flag in summary.flags)
           Padding(padding: const EdgeInsets.only(bottom: 4), child: FlagLine(flag)),
+        const SizedBox(height: 12),
+        _DiversityCard(diversity: diversity),
         if (summary.n > 0) ...[
           const SizedBox(height: 12),
           SectionCard(
@@ -117,12 +131,15 @@ class _StationSummaryScreenState extends State<StationSummaryScreen> {
             title: 'Cover by category (% of points counted)',
             child: _CoverTable(summary: summary),
           ),
+        ],
+        // Diversity alone is worth a sheet: tags don't wait for cover (#10).
+        if (summary.n > 0 || diversity.hasTags) ...[
           const SizedBox(height: 16),
           GloveButton(
             label: 'Export CPCe sheet',
             icon: Icons.ios_share,
             busy: _exporting,
-            onPressed: _exporting ? null : () => _export(summary),
+            onPressed: _exporting ? null : () => _export(summary, diversity),
           ),
         ],
       ],
@@ -188,6 +205,38 @@ class _HardCoralCard extends StatelessWidget {
               'Bleached coral ${formatPercent1(bleached.mean)}%',
               style: const TextStyle(fontSize: 14, color: AppColors.bleached),
             ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Issue #10: distinct TAUs per transect and for the station, the station
+/// figure graded on TB 2019-04 Table 2 -- or why there is none yet.
+class _DiversityCard extends StatelessWidget {
+  const _DiversityCard({required this.diversity});
+
+  final StationDiversity diversity;
+
+  @override
+  Widget build(BuildContext context) {
+    final perTransect = [for (final t in diversity.transects) 'T${t.transect.transectNumber ?? '?'} ${t.count}'];
+    return SectionCard(
+      icon: Icons.local_florist_outlined,
+      title: 'Generic diversity (station)',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!diversity.hasTags)
+            const Text(kNoDiversityYet, style: TextStyle(fontSize: 13))
+          else ...[
+            Text(diversity.gradeLine!, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            Text('${perTransect.join(' · ')} TAUs', style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 4),
+            Text(kDiversityScale, style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+            for (final flag in diversity.flags)
+              Padding(padding: const EdgeInsets.only(top: 4), child: FlagLine(flag)),
           ],
         ],
       ),

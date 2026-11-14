@@ -21,6 +21,7 @@ import '../widgets/section_card.dart';
 import '../services/share_package.dart';
 import '../widgets/share_package_sheet.dart';
 import 'app_shell.dart' show routeObserver;
+import 'point_review_screen.dart';
 import 'station_edit_screen.dart';
 import 'station_summary_screen.dart';
 import 'station_transect_setup_screen.dart';
@@ -95,7 +96,16 @@ class StationDetailScreen extends StatefulWidget {
 }
 
 class _StationData {
-  const _StationData(this.station, this.transects, [this.colonyResults = const {}, this.cover = const {}]);
+  const _StationData(
+    this.station,
+    this.transects, [
+    this.colonyResults = const {},
+    this.cover = const {},
+    this.tauCount = 0,
+  ]);
+
+  /// Issue #10: distinct genus groups tagged across the station.
+  final int tauCount;
 
   final Station? station;
   final List<TransectSession> transects;
@@ -183,7 +193,10 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
         if (!colonyCount)
           for (final t in transects) t.id!: await db.coverForSession(t.id!),
       };
-      return _StationData(station, transects, results, cover);
+      final taus = colonyCount || station == null
+          ? const <String>{}
+          : {for (final t in await db.genusTagsForStation(widget.stationId)) t.tauCode};
+      return _StationData(station, transects, results, cover, taus.length);
     } finally {
       await db.close();
     }
@@ -199,6 +212,35 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
   Future<void> _push(Widget screen) async {
     await Navigator.of(context).push<void>(MaterialPageRoute(builder: (_) => screen));
     _reload();
+  }
+
+  /// Issue #10: picks the transect (straight in when there is one), then
+  /// opens its point review and genus tagging.
+  Future<void> _expertReview(Station station, List<TransectSession> transects) async {
+    TransectSession? pick = transects.length == 1 ? transects.single : null;
+    pick ??= await showModalBottomSheet<TransectSession>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Review which transect?', style: TextStyle(fontWeight: FontWeight.w600))),
+            for (final t in transects)
+              ListTile(
+                leading: const Icon(Icons.fact_check_outlined),
+                title: Text('T${t.transectNumber ?? '?'}'),
+                onTap: () => Navigator.pop(context, t),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (pick == null || !mounted) return;
+    await _push(PointReviewScreen(
+      sessionId: pick.id!,
+      title: 'Review · ${station.code} T${pick.transectNumber ?? '?'}',
+      openDatabase: widget.openDatabase,
+    ));
   }
 
   void _addTransect(Station station) => _push(
@@ -360,7 +402,9 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
         final transects = data!.transects;
         final full = transects.length >= kMaxTransects;
         final flags = stationFlags(station, transects.length);
-        final hasCover = data.cover.values.any((rows) => rows.isNotEmpty);
+        // Issue #10: genus tags alone are enough for a summary (diversity
+        // doesn't wait for cover).
+        final hasCover = data.cover.values.any((rows) => rows.isNotEmpty) || data.tauCount > 0;
 
         return Scaffold(
           appBar: AppBar(
@@ -449,6 +493,23 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                           icon: const Icon(Icons.download_outlined),
                           label: const Text('Import analysis results'),
                         ),
+                        const SizedBox(height: 8),
+                        // Issue #10: correct points and tag genus groups.
+                        OutlinedButton.icon(
+                          onPressed: _analysisBusy || transects.isEmpty
+                              ? null
+                              : () => _expertReview(station, transects),
+                          icon: const Icon(Icons.fact_check_outlined),
+                          label: const Text('Expert review'),
+                        ),
+                        if (data.tauCount > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              'Genus groups tagged: ${data.tauCount} TAUs',
+                              style: TextStyle(color: Colors.grey.shade700, fontSize: 12),
+                            ),
+                          ),
                         if (_analysisBusy)
                           const Padding(
                             padding: EdgeInsets.only(top: 8),

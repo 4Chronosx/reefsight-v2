@@ -4,13 +4,16 @@ import 'package:csv/csv.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'frame_point.dart';
+import 'genus_tag.dart';
 import 'geo_fix.dart';
 import 'recount_comparison.dart';
 import 'report_data.dart';
 import 'session_summary.dart';
 import 'station.dart';
 import 'station_checks.dart';
+import 'station_diversity.dart';
 import 'station_summary.dart';
+import 'tau_catalogue.dart';
 import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
 import 'transect_cover.dart';
@@ -372,6 +375,8 @@ class ReportExporter {
         '${_sanitizeForFilename(station.code)}_cpce_${_isoDay(station.surveyedOn)}.csv';
   }
 
+  static String _meterCell(double? m) => m == null ? '' : _meters(m);
+
   static String _meters(double m) => m == m.roundToDouble() ? m.toStringAsFixed(0) : m.toString();
 
   /// Issue #8: the station sheet in the layout of TB 2017-05's CPCe sample
@@ -383,9 +388,16 @@ class ReportExporter {
   /// every flag. Percentages have two decimals in the table; the result
   /// lines show one, the precision the grade is taken at. A blank cell is a
   /// value that doesn't exist (SD with one transect), never a zero.
+  ///
+  /// Issue #10: with [diversity], the generic diversity follows the cover
+  /// result -- distinct TAUs per transect (every transect of the station,
+  /// analyzed or not: tags don't wait for cover) and across the station, a
+  /// TAU-by-transect grid, the station figure and its TB 2019-04 grade, and
+  /// the diversity flags.
   static Future<String> exportStationCpceCsv({
     required String outputDirectory,
     required StationCoverSummary summary,
+    StationDiversity? diversity,
   }) {
     final station = summary.station;
     final t = summary.analyzed;
@@ -468,6 +480,63 @@ class ReportExporter {
       ['Hard coral grade (TB 2019-04)', summary.gradeLine ?? ''],
       ['Bleached coral (station mean, %)', bleached == null ? '' : formatPercent1(bleached.mean)],
       for (final flag in summary.flags) ['Flag', flag],
+      if (diversity != null) ..._diversityRows(diversity, preliminary: summary.isPreliminary),
+    ]);
+  }
+
+  static List<List<dynamic>> _diversityRows(StationDiversity d, {required bool preliminary}) {
+    String label(TransectDiversity t) => 'T${t.transect.transectNumber ?? '?'}';
+    String seen(bool yes) => yes ? 'x' : '';
+    final grade = d.grade;
+    return [
+      [],
+      if (d.hasTags) ...[
+        ['GENERIC DIVERSITY (TB 2019-04)', for (final t in d.transects) label(t), 'STATION'],
+        ['Distinct TAUs (genus groups)', for (final t in d.transects) t.count, d.stationCount],
+        [],
+        ['GENUS GROUPS (TAUs)', for (final t in d.transects) label(t), 'STATION'],
+        for (final code in d.stationTaus)
+          // "TAU", since some names and codes are also TB life-form rows
+          // above (Acropora branching, ACB).
+          ['TAU ${tau(code).name} ($code)', for (final t in d.transects) seen(t.taus.contains(code)), seen(true)],
+        [],
+      ],
+      ['Diversity (station, TAUs)', d.stationCount ?? ''],
+      ['Diversity grade (TB 2019-04)', grade == null ? '' : '${grade.letter}${preliminary ? ', indicative' : ''}'],
+      ['Diversity scale', kDiversityScale],
+      for (final flag in d.flags) ['Flag', flag],
+    ];
+  }
+
+  static const genusTagsCsvHeaders = ['Photo', 'Meter', 'TAU', 'TAU Name', 'Tagged By', 'Tagged At'];
+
+  /// Issue #10: `genus_tags.csv` -- one transect's genus-group tags, tape
+  /// tags (no photo) first, then along the tape. "Photo" is the photo's name
+  /// inside the share package ([photoNames], by frame id).
+  static Future<String> exportGenusTagsCsv({
+    required String outputDirectory,
+    required List<TransectFrame> frames,
+    required List<GenusTag> tags,
+    required Map<int, String> photoNames,
+  }) {
+    final byId = {for (final f in frames) f.id: f};
+    final order = {for (var i = 0; i < frames.length; i++) frames[i].id: i};
+    final sorted = [...tags]..sort((a, b) {
+        final fa = a.frameId == null ? -1 : (order[a.frameId] ?? frames.length);
+        final fb = b.frameId == null ? -1 : (order[b.frameId] ?? frames.length);
+        return fa != fb ? fa.compareTo(fb) : a.tauCode.compareTo(b.tauCode);
+      });
+    return _write(outputDirectory, 'genus_tags.csv', [
+      genusTagsCsvHeaders,
+      for (final t in sorted)
+        [
+          t.frameId == null ? '(on tape, no photo)' : (photoNames[t.frameId] ?? ''),
+          _meterCell(byId[t.frameId]?.meterMark),
+          t.tauCode,
+          isTauCode(t.tauCode) ? tau(t.tauCode).name : '',
+          t.taggedBy ?? '',
+          t.taggedAt?.toUtc().toIso8601String() ?? '',
+        ],
     ]);
   }
 

@@ -8,9 +8,11 @@ import 'package:share_plus/share_plus.dart';
 import 'colony_photos.dart';
 import 'cover_calculator.dart';
 import 'frame_point.dart';
+import 'genus_tag.dart';
 import 'report_exporter.dart';
 import 'station.dart';
 import 'station_checks.dart';
+import 'station_diversity.dart';
 import 'station_summary.dart';
 import 'tracked_colony_record.dart';
 import 'transect_database.dart';
@@ -26,7 +28,7 @@ import 'transect_session.dart';
 /// ALG-S1_2026-11-15/
 ///   station_summary_CPCe.csv     (every transect in, and one analyzed)
 ///   station_info.csv
-///   T1/ photos/001_m00.jpg …  transect_cover.csv  points.csv  [video.mp4]
+///   T1/ photos/001_m00.jpg …  transect_cover.csv  points.csv  genus_tags.csv  [video.mp4]
 /// ```
 ///
 /// A colony-count or unassigned transect's folder holds its existing colony
@@ -133,12 +135,16 @@ class ShareTransect {
     required this.missingPhotos,
     required this.colonyPhotos,
     required this.video,
+    this.genusTags = const [],
   });
 
   final TransectSession session;
   final String folder;
   final List<TransectFrame> frames;
   final List<FramePoint> points;
+
+  /// The expert's genus-group tags (#10); empty outside bulletin stations.
+  final List<GenusTag> genusTags;
   final List<TrackedColonyRecord> colonies;
 
   /// Photo and preliminary transects' cover (bulletin categories); `null`
@@ -181,7 +187,7 @@ class ShareOptions {
 
 /// Everything that could go in a package, loaded once for the picker.
 class ShareSource {
-  ShareSource._({required this.station, required this.transects, required this.summary});
+  ShareSource._({required this.station, required this.transects, required this.summary, this.diversity});
 
   /// `null` for an unassigned survey.
   final Station? station;
@@ -191,6 +197,10 @@ class ShareSource {
   /// station with at least one analyzed transect.
   final StationCoverSummary? summary;
 
+  /// The station's generic diversity (#10), over all its transects; `null`
+  /// outside bulletin stations. Goes in the station sheet with [summary].
+  final StationDiversity? diversity;
+
   /// Throws [ArgumentError] for an unknown station.
   static Future<ShareSource> forStation(TransectDatabase db, int stationId, {required String documentsPath}) async {
     final station = await db.stationById(stationId);
@@ -199,13 +209,21 @@ class ShareSource {
     final inputs = bulletin ? await db.stationCoverInputs(stationId) : const <StationTransectCover>[];
     final covers = {for (final c in inputs) c.transect.id!: c.cover};
     final summary = bulletin ? StationCoverSummary.compute(station, inputs) : null;
+    final transects = await db.transectsForStation(stationId);
+    final tags = bulletin ? await db.genusTagsForStation(stationId) : const <GenusTag>[];
+    final diversity = bulletin ? StationDiversity.compute(transects, tags) : null;
+    // The sheet goes in with an analyzed transect, or with genus tags alone:
+    // diversity doesn't wait for cover (#10).
+    final hasSheet = summary != null && (summary.analyzed.isNotEmpty || (diversity?.hasTags ?? false));
     return ShareSource._(
       station: station,
       transects: [
-        for (final t in await db.transectsForStation(stationId))
-          await _load(db, t, covers[t.id], documentsPath, bulletin: bulletin),
+        for (final t in transects)
+          await _load(db, t, covers[t.id], documentsPath,
+              bulletin: bulletin, genusTags: [for (final g in tags) if (g.sessionId == t.id) g]),
       ],
-      summary: summary != null && summary.analyzed.isNotEmpty ? summary : null,
+      summary: hasSheet ? summary : null,
+      diversity: diversity,
     );
   }
 
@@ -231,6 +249,7 @@ class ShareSource {
     CoverComputation? cover,
     String documentsPath, {
     required bool bulletin,
+    List<GenusTag> genusTags = const [],
   }) async {
     final id = session.id!;
     final frames = await db.framesForSession(id);
@@ -267,6 +286,7 @@ class ShareSource {
       folder: transectFolder(session),
       frames: frames,
       points: bulletin ? await db.pointsForSession(id) : const [],
+      genusTags: genusTags,
       colonies: colonies,
       cover: bulletin ? cover : null,
       photos: photos,
@@ -393,7 +413,11 @@ Future<String> writeShareZip(
     }
     if (source.includesStationSummary(options)) {
       await add(
-        await ReportExporter.exportStationCpceCsv(outputDirectory: staging.path, summary: source.summary!),
+        await ReportExporter.exportStationCpceCsv(
+          outputDirectory: staging.path,
+          summary: source.summary!,
+          diversity: source.diversity,
+        ),
         'station_summary_CPCe.csv',
       );
     }
@@ -417,6 +441,15 @@ Future<String> writeShareZip(
             photoNames: t.photoNames,
           ),
           '${t.folder}/points.csv',
+        );
+        await add(
+          await ReportExporter.exportGenusTagsCsv(
+            outputDirectory: dir,
+            frames: t.frames,
+            tags: t.genusTags,
+            photoNames: t.photoNames,
+          ),
+          '${t.folder}/genus_tags.csv',
         );
       } else {
         for (final path in [

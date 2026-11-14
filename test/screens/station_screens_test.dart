@@ -19,6 +19,7 @@ import 'package:reefsight_mobile/screens/transect_setup_screen.dart';
 import 'package:reefsight_mobile/services/health_aggregator.dart';
 import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/station_diversity.dart';
 import 'package:reefsight_mobile/services/station_summary.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
@@ -723,6 +724,26 @@ void main() {
         return session;
       }
 
+      // Issue #10: diversity doesn't wait for cover, so tags alone open it.
+      testWidgets('opens from the station with genus tags and no cover, showing diversity', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        final t = await scored(db, id, 1, 0, label: false);
+        await db.setTransectTaus(t, {'PORM', 'HEL'}, by: 'Expert', at: DateTime.utc(2026, 11, 16));
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+        expect(find.text('Genus groups tagged: 2 TAUs'), findsOneWidget);
+        expect(find.text(kNoSummaryYet), findsNothing);
+        await tester.tap(find.text('Station summary'));
+        await tester.pumpAndSettle();
+        expect(find.text(kNoCoverYet), findsOneWidget);
+        expect(find.text('2 TAUs: category D'), findsOneWidget);
+        expect(find.text('Export CPCe sheet'), findsOneWidget);
+      });
+
       testWidgets('opens from the station once a transect has cover', (tester) async {
         _useTallSurface(tester);
         final db = await _db();
@@ -752,7 +773,7 @@ void main() {
           home: StationSummaryScreen(
             stationId: id,
             openDatabase: () async => db,
-            exportSheet: (summary) async => exported = summary,
+            exportSheet: (summary, _) async => exported = summary,
           ),
         ));
         await tester.pumpAndSettle();
@@ -772,6 +793,68 @@ void main() {
         await tester.tap(find.text('Export CPCe sheet'));
         await tester.pumpAndSettle();
         expect(exported?.n, 3);
+      });
+
+      // Issue #10: an expert's correction changes cover; tags give diversity.
+      testWidgets('a point correction changes the station\'s hard coral cover', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        final t1 = await scored(db, id, 1, 3);
+        await scored(db, id, 2, 4);
+        await scored(db, id, 3, 5);
+        // T1: one sand point corrected to coral, 3 -> 4 of 10.
+        final sand = (await db.pointsForSession(t1)).firstWhere((p) => p.categoryCode == 'S');
+        await db.setExpertCategory(sand.id!, 'CB', by: 'Expert', at: DateTime.utc(2026, 11, 16));
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+        expect(find.text('43.3%'), findsOneWidget);
+      });
+
+      testWidgets('shows diversity per transect and for the station, and exports it', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        final t1 = await scored(db, id, 1, 3);
+        final t2 = await scored(db, id, 2, 4);
+        await scored(db, id, 3, 5);
+        final at = DateTime.utc(2026, 11, 16);
+        await db.setTransectTaus(t1, {'PORM', 'ACB'}, by: 'Expert', at: at);
+        await db.setTransectTaus(t2, {'PORM'}, by: 'Expert', at: at);
+        StationDiversity? exported;
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            exportSheet: (_, diversity) async => exported = diversity,
+          ),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Generic diversity (station)'), findsOneWidget);
+        expect(find.text('2 TAUs: category D'), findsOneWidget);
+        expect(find.text('T1 2 · T2 1 · T3 0 TAUs'), findsOneWidget);
+        expect(find.text(kDiversityScale), findsOneWidget);
+        expect(find.text('T3 has no genus tags'), findsOneWidget);
+
+        await tester.tap(find.text('Export CPCe sheet'));
+        await tester.pumpAndSettle();
+        expect(exported?.stationCount, 2);
+      });
+
+      testWidgets('without tags, diversity says why instead of a grade', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await scored(db, id, 1, 3);
+        await tester.pumpWidget(MaterialApp(
+          home: StationSummaryScreen(stationId: id, openDatabase: () async => db),
+        ));
+        await tester.pumpAndSettle();
+        expect(find.text(kNoDiversityYet), findsOneWidget);
+        expect(find.textContaining('TAUs: category'), findsNothing);
       });
 
       testWidgets('a preliminary station is stamped and its grade indicative', (tester) async {
@@ -799,7 +882,7 @@ void main() {
         ));
         await tester.pumpAndSettle();
 
-        expect(find.text(kNoSummaryYet), findsOneWidget);
+        expect(find.text(kNoCoverYet), findsOneWidget);
         expect(find.text('Export CPCe sheet'), findsNothing);
       });
     });

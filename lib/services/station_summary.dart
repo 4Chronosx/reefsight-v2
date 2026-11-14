@@ -49,7 +49,10 @@ CoverGrade gradeHardCoral(double meanPercent) {
 }
 
 /// Where a station has no analyzed transect yet, so no summary.
-const kNoSummaryYet = 'The station summary appears once a transect has been analyzed.';
+const kNoSummaryYet = 'The station summary appears once a transect has been analyzed or genus groups tagged.';
+
+/// On the summary when it opened for genus tags alone (#10).
+const kNoCoverYet = 'No transect analyzed yet: cover appears once one is.';
 
 /// Shown when one transect gives a mean but no spread.
 const kFlagNoSpread = 'One transect: no SD or SE';

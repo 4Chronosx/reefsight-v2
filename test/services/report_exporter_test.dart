@@ -4,6 +4,7 @@ import 'package:csv/csv.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:reefsight_mobile/services/cover_calculator.dart';
+import 'package:reefsight_mobile/services/genus_tag.dart';
 import 'package:reefsight_mobile/services/geo_fix.dart';
 import 'package:reefsight_mobile/services/health_history_recorder.dart';
 import 'package:reefsight_mobile/services/recount.dart';
@@ -11,9 +12,11 @@ import 'package:reefsight_mobile/services/report_exporter.dart';
 import 'package:reefsight_mobile/services/session_summary.dart';
 import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
+import 'package:reefsight_mobile/services/station_diversity.dart';
 import 'package:reefsight_mobile/services/station_summary.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_cover.dart';
+import 'package:reefsight_mobile/services/transect_frame.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
 // Sub-plan 5 (ui-and-reporting), task 6: CSV export, adapted from v1's
@@ -762,6 +765,95 @@ void main() {
       expect(rows.any((r) => r.first == 'TRANSECT NAME'), isFalse);
       expect(rowOf(rows, 'Transects analyzed')[1], '0');
       expect(rowOf(rows, 'Hard coral grade (TB 2019-04)')[1], '');
+    });
+
+    // Issue #10: diversity after the cover result, over all the station's
+    // transects (tags don't wait for cover), with a TAU-by-transect grid.
+    group('diversity', () {
+      GenusTag tag(int session, String code) => GenusTag(stationId: 1, sessionId: session, tauCode: code);
+      final transects = [for (final x in three) x.transect];
+
+      Future<List<List<dynamic>>> exportWith(StationDiversity? diversity, {SurveyType type = SurveyType.photoTransect}) async {
+        final path = await ReportExporter.exportStationCpceCsv(
+          outputDirectory: tempDir.path,
+          summary: StationCoverSummary.compute(station(type: type), three),
+          diversity: diversity,
+        );
+        return const CsvToListConverter(shouldParseNumbers: false, eol: '\n')
+            .convert(File(path).readAsStringSync().replaceAll('\r\n', '\n'));
+      }
+
+      test('per transect and station counts, then which TAU was seen where', () async {
+        final rows = await exportWith(StationDiversity.compute(transects, [
+          tag(1, 'PORM'),
+          tag(1, 'ACB'),
+          tag(3, 'PORM'),
+          tag(3, 'HEL'),
+        ]));
+        expect(rowOf(rows, 'GENERIC DIVERSITY (TB 2019-04)'), ['GENERIC DIVERSITY (TB 2019-04)', 'T1', 'T2', 'T3', 'STATION']);
+        expect(rowOf(rows, 'Distinct TAUs (genus groups)').sublist(1), ['2', '0', '2', '3']);
+        // Prefixed: "Acropora branching (ACB)" is also a TB life-form row above.
+        expect(rowOf(rows, 'TAU Acropora branching (ACB)').sublist(1), ['x', '', '', 'x']);
+        expect(rowOf(rows, 'TAU Heliopora (HEL)').sublist(1), ['', '', 'x', 'x']);
+        expect(rowOf(rows, 'TAU Porites massive (PORM)').sublist(1), ['x', '', 'x', 'x']);
+        expect(rowOf(rows, 'Diversity (station, TAUs)')[1], '3');
+        expect(rowOf(rows, 'Diversity grade (TB 2019-04)')[1], 'D');
+        expect(rows.where((r) => r.first == 'Flag').map((r) => r[1]), contains('T2 has no genus tags'));
+        // The cover result rows stay where they were, before diversity.
+        final names = rows.map((r) => r.first).toList();
+        expect(names.indexOf('Bleached coral (station mean, %)'), lessThan(names.indexOf('GENERIC DIVERSITY (TB 2019-04)')));
+      });
+
+      test('no tags: blank figure and grade (not D), with the reason', () async {
+        final rows = await exportWith(StationDiversity.compute(transects, const []));
+        expect(rows.any((r) => r.first == 'GENERIC DIVERSITY (TB 2019-04)'), isFalse);
+        expect(rowOf(rows, 'Diversity (station, TAUs)')[1], '');
+        expect(rowOf(rows, 'Diversity grade (TB 2019-04)')[1], '');
+        expect(rows.where((r) => r.first == 'Flag').map((r) => r[1]), contains(kNoDiversityYet));
+      });
+
+      test('a preliminary station\'s grade is indicative', () async {
+        final rows = await exportWith(StationDiversity.compute(transects, [tag(1, 'PORM')]),
+            type: SurveyType.preliminaryVideo);
+        expect(rowOf(rows, 'Diversity grade (TB 2019-04)')[1], 'D, indicative');
+      });
+
+      test('left out (the #8 callers) writes no diversity rows', () async {
+        final rows = await exportWith(null);
+        expect(rows.any((r) => r.first == 'Diversity (station, TAUs)'), isFalse);
+      });
+    });
+  });
+
+  group('ReportExporter.exportGenusTagsCsv', () {
+    late Directory tempDir;
+    setUp(() => tempDir = Directory.systemTemp.createTempSync('reefsight_tags_'));
+    tearDown(() => tempDir.deleteSync(recursive: true));
+
+    test('one row per tag: photo and meter (or the tape), TAU, who and when', () async {
+      final frame = TransectFrame(
+        id: 7,
+        sessionId: 1,
+        meterMark: 3,
+        imagePath: 'frames/1/m3.jpg',
+        source: FrameSource.inApp,
+      );
+      final at = DateTime.utc(2026, 11, 16, 3);
+      final path = await ReportExporter.exportGenusTagsCsv(
+        outputDirectory: tempDir.path,
+        frames: [frame],
+        tags: [
+          GenusTag(stationId: 1, sessionId: 1, tauCode: 'TUBI', taggedBy: 'A', taggedAt: at),
+          GenusTag(stationId: 1, sessionId: 1, frameId: 7, tauCode: 'PORM', taggedBy: 'A', taggedAt: at),
+        ],
+        photoNames: {7: 'photos/004_m03.jpg'},
+      );
+      expect(p.basename(path), 'genus_tags.csv');
+      final rows = const CsvToListConverter(shouldParseNumbers: false, eol: '\n')
+          .convert(File(path).readAsStringSync().replaceAll('\r\n', '\n'));
+      expect(rows.first, ['Photo', 'Meter', 'TAU', 'TAU Name', 'Tagged By', 'Tagged At']);
+      expect(rows[1], ['(on tape, no photo)', '', 'TUBI', 'Tubipora musica', 'A', '2026-11-16T03:00:00.000Z']);
+      expect(rows[2], ['photos/004_m03.jpg', '3', 'PORM', 'Porites massive', 'A', '2026-11-16T03:00:00.000Z']);
     });
   });
 }
