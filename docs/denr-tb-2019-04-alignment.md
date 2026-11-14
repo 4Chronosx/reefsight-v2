@@ -214,8 +214,13 @@ physical frame stays the default.
    and self-contained. Build it before November 15 **only if** it can be tested on the phone the day
    before; otherwise build it after the dive.
 2. **Lens calibration underwater.** In a pool, photograph a 1 m × 1 m square at known distances with each
-   lens, and measure the real field of view through the housing.
-3. **Distance from lasers (or the tape).** Add dot detection and a distance and scale readout.
+   lens, and measure the real field of view through the housing. **Tooling built in #14 (2026-11-15); pool test
+   not done yet**: a capture screen tags each pool still (lens, medium, target, tape distance, tilt), notebook 31 fits
+   both lenses underwater from a checkerboard and checks the fit on the 1 m square, and the phone loads the result
+   (`docs/underwater-lens-calibration-and-distance.md`, checklist `docs/underwater-lens-calibration-protocol.md`).
+3. **Distance from lasers (or the tape).** Add dot detection and a distance and scale readout. **Laser path built in
+   #14 (2026-11-15)**: dot detection, distance = baseline / undistorted gap, cm per pixel, and a readout against the
+   tape. Agreed tolerance ±10 cm over 1.0-1.4 m; not yet measured in water. Tape and ARKit paths wait for the pool results.
 4. **Virtual square and auto-capture.** Draw the square, crop the saved photo, and capture automatically
    when all checks pass.
 5. **Validation.** On the same tapes, compare Physical and Virtual mode on % hard coral cover per

@@ -120,6 +120,14 @@ any non-trivial architecture decision.
   research or evaluation only), so shipping them in the app (#12) is not cleared. Method, thresholds
   and license: `../docs/coralscapes-coreml-speed-test.md`.
 - **Next: run #11 on the phone, then decide #12.**
+- **#14 Underwater lens calibration and distance measurement**
+  (`sub-plans/31-lens-calibration-and-distance.md`): **tooling done 2026-11-15** (Dart tests; notebook 31
+  written, not run; **pool test not done**). Main or ultra-wide lens for stills (no native code), a lens
+  model loaded from notebook 31's `lens_calibration.json`, laser-dot detection and distance from the dot
+  pair, and a capture screen (Settings → Diagnostics → Lens calibration) that tags each pool still with
+  lens, medium, target, tape distance and tilt. Tolerance ±10 cm over 1.0–1.4 m (D1). Reasoning:
+  `../docs/underwater-lens-calibration-and-distance.md`; pool checklist:
+  `../docs/underwater-lens-calibration-protocol.md`.
 
 ## Explicitly out of scope for now
 

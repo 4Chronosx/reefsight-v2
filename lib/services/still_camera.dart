@@ -2,6 +2,8 @@ import 'package:camera/camera.dart';
 import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:flutter/widgets.dart';
 
+import 'lens_calibration.dart' show CameraLens;
+
 /// Issue #4: the still camera for photo-transect capture, behind an
 /// interface because the `camera` plugin has no platform channel under
 /// `flutter test`.
@@ -27,18 +29,44 @@ abstract interface class StillCameraOpener {
   Future<StillCamera> open();
 }
 
-/// The real [StillCameraOpener]: the back wide camera at the highest
-/// preset, JPEG, flash off, no audio.
+/// Issue #14: which back camera serves [lens]. On iOS the plugin lists each
+/// physical lens separately with its `lensType` (camera_avfoundation 0.9.23:
+/// wide, telephoto, ultra-wide, in that discovery order), so the ultra-wide
+/// needs no native code. [CameraLens.main] takes the wide lens, falling back
+/// to the first back camera where the platform doesn't report lens types
+/// (Android) -- the camera this opener always used before. `null` when no
+/// back camera matches.
+CameraDescription? pickBackCamera(List<CameraDescription> cameras, CameraLens lens) {
+  final back = [for (final c in cameras) if (c.lensDirection == CameraLensDirection.back) c];
+  final wanted = switch (lens) {
+    CameraLens.main => CameraLensType.wide,
+    CameraLens.ultraWide => CameraLensType.ultraWide,
+  };
+  for (final c in back) {
+    if (c.lensType == wanted) return c;
+  }
+  if (lens == CameraLens.main && back.isNotEmpty) return back.first;
+  return null;
+}
+
+/// The real [StillCameraOpener]: a back camera ([lens], the 1× main lens
+/// unless asked otherwise) at the highest preset, JPEG, flash off, no audio.
 class PluginStillCameraOpener implements StillCameraOpener {
-  const PluginStillCameraOpener();
+  const PluginStillCameraOpener({this.lens = CameraLens.main});
+
+  final CameraLens lens;
 
   @override
   Future<StillCamera> open() async {
     final cameras = await availableCameras();
-    final back = cameras.where((c) => c.lensDirection == CameraLensDirection.back);
-    if (back.isEmpty) throw CameraException('noBackCamera', 'This phone has no back camera');
+    final camera = pickBackCamera(cameras, lens);
+    if (camera == null) {
+      throw lens == CameraLens.main
+          ? CameraException('noBackCamera', 'This phone has no back camera')
+          : CameraException('noUltraWide', 'This phone has no ultra-wide back camera');
+    }
     final controller = CameraController(
-      back.first,
+      camera,
       ResolutionPreset.max,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.jpeg,
