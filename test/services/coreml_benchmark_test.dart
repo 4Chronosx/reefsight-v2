@@ -392,13 +392,38 @@ void main() {
         iterations: 2,
         onArm: (a) async => reported.add('${a.model}/${a.units.name}'),
       );
+      // Lightest model first, so a crash on a heavy one still leaves results.
       expect(arms.map((a) => '${a.model}/${a.units.name}'), [
-        'cs_1024/cpuAndNeuralEngine',
-        'cs_1024/all',
         'cs_512/cpuAndNeuralEngine',
         'cs_512/all',
+        'cs_1024/cpuAndNeuralEngine',
+        'cs_1024/all',
       ]);
       expect(reported, arms.map((a) => '${a.model}/${a.units.name}'));
+    });
+
+    test('lightestFirst: smallest input, then int8 weights', () {
+      Map<String, Object?> m(String name, int size, String weights) => {
+        'name': name,
+        'path': 'models/$name.mlpackage',
+        'input_size': size,
+        'weights': weights,
+        'windows_per_photo': 2,
+      };
+      final manifest = BenchManifest.fromJson(manifestJson(
+        models: [m('cs_1024', 1024, 'fp16'), m('cs_1024_w8', 1024, 'w8'), m('cs_512', 512, 'fp16'), m('cs_512_w8', 512, 'w8')],
+      ));
+      expect(manifest.lightestFirst.map((x) => x.name), ['cs_512_w8', 'cs_512', 'cs_1024_w8', 'cs_1024']);
+    });
+
+    test('the quick test runs only the lightest model, on CPU + Neural Engine, without the plan', () async {
+      final bench = FakeBench();
+      final arm = await runner(bench).runQuick();
+      expect(arm.model, 'cs_512');
+      expect(arm.units, ComputeUnits.cpuAndNeuralEngine);
+      expect(arm.plan, isNull);
+      expect(arm.latenciesMs, hasLength(10));
+      expect(bench.loaded, hasLength(1));
     });
 
     test('the sampled peak during a call counts, and heat is recorded per arm', () async {

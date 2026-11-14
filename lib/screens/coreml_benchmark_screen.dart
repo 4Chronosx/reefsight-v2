@@ -95,6 +95,29 @@ class _CoreMlBenchmarkScreenState extends State<CoreMlBenchmarkScreen> {
   ComputeUnits _sustainedUnits = ComputeUnits.cpuAndNeuralEngine;
   int _sustainedMinutes = 20;
 
+  /// Results folders from earlier runs, newest first. A run that iOS closed
+  /// (memory, heat) still saved its log and every finished arm, so it can be
+  /// shared from here after the app is reopened.
+  List<Directory> _earlier = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshEarlier();
+  }
+
+  Future<void> _refreshEarlier() async {
+    try {
+      final dir = Directory(p.join((await widget.workDir()).path, 'results'));
+      if (!dir.existsSync()) return;
+      final found = dir.listSync().whereType<Directory>().toList()
+        ..sort((a, b) => p.basename(b.path).compareTo(p.basename(a.path)));
+      if (mounted) setState(() => _earlier = found);
+    } catch (error) {
+      debugPrint('ReefSight: could not list earlier benchmark results: $error');
+    }
+  }
+
   /// Leaving the screen stops a run at its next check, rather than leaving a
   /// 20 min inference loop running out of sight.
   @override
@@ -116,7 +139,7 @@ class _CoreMlBenchmarkScreenState extends State<CoreMlBenchmarkScreen> {
       setState(() {
         _package = package;
         _outDir = out;
-        _sustainedModel = package.manifest.models.last;
+        _sustainedModel = package.manifest.lightestFirst.first;
         _arms.clear();
         _sustained.clear();
         _log.clear();
@@ -162,8 +185,18 @@ class _CoreMlBenchmarkScreenState extends State<CoreMlBenchmarkScreen> {
     } finally {
       lease.release();
       if (mounted) setState(() => _busy = null);
+      await _refreshEarlier();
     }
   }
+
+  /// The quick test: one arm, the least strain on the phone. Like a matrix,
+  /// it replaces the previous arms.
+  Future<void> _runQuick() => _run('Quick test…', (runner) async {
+    setState(_arms.clear);
+    final arm = await runner.runQuick(shouldStop: () => _stop);
+    _arms.add(arm);
+    if (mounted) setState(() {});
+  });
 
   /// A new matrix replaces the previous one's arms. Each arm is saved as it
   /// finishes, so a run the OS kills (memory, heat) keeps what it measured.
@@ -240,21 +273,35 @@ class _CoreMlBenchmarkScreenState extends State<CoreMlBenchmarkScreen> {
             const SizedBox(height: 16),
             SectionCard(
               icon: Icons.speed,
-              title: 'Latency matrix',
+              title: 'Speed',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Every model on CPU + Neural Engine, All, and CPU + GPU: 3 warm-up runs '
-                    '(which also write the class maps), then 30 timed runs.',
-                    style: TextStyle(fontSize: 13),
+                  Text(
+                    'Quick test: ${package.manifest.lightestFirst.first.name} on CPU + Neural Engine, '
+                    '3 warm-up runs (which also write the class maps), then 10 timed runs. '
+                    'Start here: it is the least strain on the phone.',
+                    style: const TextStyle(fontSize: 13),
                   ),
                   const SizedBox(height: 8),
                   FilledButton.icon(
+                    key: const Key('bench-run-quick'),
+                    onPressed: busy ? null : _runQuick,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Quick test'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Full matrix (heavier; may be closed by iOS for memory): every model, lightest '
+                    'first, on CPU + Neural Engine, All, and CPU + GPU, 30 timed runs each.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
                     key: const Key('bench-run-matrix'),
                     onPressed: busy ? null : _runMatrix,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Run matrix'),
+                    icon: const Icon(Icons.grid_view),
+                    label: const Text('Run full matrix'),
                   ),
                   for (final arm in _arms) _ArmTile(arm),
                 ],
@@ -347,6 +394,34 @@ class _CoreMlBenchmarkScreenState extends State<CoreMlBenchmarkScreen> {
             ],
           ] else if (busy)
             Padding(padding: const EdgeInsets.only(top: 16), child: Text(_busy!)),
+          if (_earlier.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            SectionCard(
+              icon: Icons.history,
+              title: 'Earlier results',
+              child: Column(
+                children: [
+                  for (final dir in _earlier)
+                    ListTile(
+                      key: Key('bench-earlier-${p.basename(dir.path)}'),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: Text(p.basename(dir.path)),
+                      subtitle: Text(
+                        File(p.join(dir.path, 'bench_results.json')).existsSync()
+                            ? 'Has results'
+                            : 'Log only (closed before the first result)',
+                      ),
+                      trailing: IconButton(
+                        tooltip: 'Share',
+                        icon: const Icon(Icons.ios_share),
+                        onPressed: busy ? null : () => widget.shareResults(dir),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );

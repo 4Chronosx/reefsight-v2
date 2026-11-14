@@ -61,6 +61,13 @@ Roadmap position: **M3**, the go/no-go gate for #12 (the Core ML bridge). It fol
 1. **Codemagic build** of this commit, checked before anything else: the Swift has never been compiled.
 2. Run notebook 29 part 1 in the Linux container. Optionally first copy 4–8 Alegria photos from the Nov 15 dive into
    `datasets/reefsight_analysis/alegria_2026-11-15_samples/`.
-3. On the iPhone 14 (doc §3 protocol): Load package → Run matrix → cool down → sustained 20 min → Share results.
+3. On the iPhone 14 (doc §3 protocol), **minimum first** (2026-11-15: the full matrix was closed by iOS after a few
+   minutes, probably for memory; unconfirmed):
+   - Load package (the zip reaches the phone through iCloud Drive or Google Drive → Files; AirDrop needs a Mac).
+   - **Quick test**: `cs_512_w8` on CPU + Neural Engine, no compute plan, 10 timed runs.
+   - Sustained test, which defaults to the same lightest model; 5 min is enough for a first heat reading.
+   - Share results. A run iOS closed can be shared later from **Earlier results**; its `log.txt` logs each step
+     before it starts, so the last line names the step that died.
+   - The full matrix (lightest model first) only once the quick test works.
 4. Run notebook 29 part 2; fill in the doc's §5; decide go / post-dive only / no-go; comment on #11.
 5. **License:** ask EPFL-ECEO about the NVIDIA `mit-b5` terms before #12 ships any weights (doc §4).

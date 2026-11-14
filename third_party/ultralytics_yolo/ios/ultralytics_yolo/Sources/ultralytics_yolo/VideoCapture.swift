@@ -282,8 +282,24 @@ class VideoCapture: NSObject, @unchecked Sendable {
     cameraQueue.async { [weak self] in
       guard let self else { return }
       self.recordingCompletion = completion
+      // The file's orientation is fixed when recording starts, so match the
+      // interface (landscape on Live) right before it.
+      self.syncMovieOrientation()
       self.movieOutput.startRecording(to: url, recordingDelegate: self)
     }
+  }
+
+  /// ReefSight: gives `movieOutput` the same orientation as `videoOutput`
+  /// (which follows the interface). Without this the movie connection keeps
+  /// its default, portrait, and a landscape recording is tagged portrait, so
+  /// every player (the app's, Photos) shows it sideways. Not changed while a
+  /// file is being written: it wouldn't affect that file.
+  private func syncMovieOrientation() {
+    guard !movieOutput.isRecording,
+      let movie = movieOutput.connection(with: .video), movie.isVideoOrientationSupported,
+      let source = videoOutput.connection(with: .video)
+    else { return }
+    movie.videoOrientation = source.videoOrientation
   }
 
   /// Stops the current recording, if any. `completion` fires once the file
@@ -352,6 +368,7 @@ class VideoCapture: NSObject, @unchecked Sendable {
     configureVideoMirroring(connection, isMirrored: isFront)
     self.previewLayer?.connection?.videoOrientation = connection.videoOrientation
     configureVideoMirroring(self.previewLayer?.connection, isMirrored: isFront)
+    syncMovieOrientation()
     frameSizeCaptured = false
   }
 

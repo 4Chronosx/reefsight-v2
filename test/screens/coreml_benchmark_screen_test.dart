@@ -165,6 +165,24 @@ void main() {
     expect(find.byKey(const Key('bench-arm')), findsNWidgets(6));
   });
 
+  testWidgets('the quick test runs one arm, and its folder can be shared again later', (tester) async {
+    await pump(tester, zip: benchZip());
+    await tapAndWait(tester, find.byKey(const Key('bench-load')));
+    await tapAndWait(tester, find.byKey(const Key('bench-run-quick')));
+    expect(find.byKey(const Key('bench-arm')), findsOneWidget);
+    expect(find.textContaining('cs_512 · CPU + Neural Engine'), findsOneWidget);
+
+    // As after a relaunch: a fresh screen lists the earlier folder and can share it.
+    await tester.pumpWidget(const SizedBox());
+    final shared = await pump(tester, zip: benchZip());
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 300)));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Has results'), findsOneWidget);
+    await tester.tap(find.byTooltip('Share'));
+    await tester.pump();
+    expect(shared, hasLength(1));
+  });
+
   testWidgets('a zip that is not a benchmark package shows why', (tester) async {
     await pump(tester, zip: benchZip(valid: false));
     await tapAndWait(tester, find.byKey(const Key('bench-load')));

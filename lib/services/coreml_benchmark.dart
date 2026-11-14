@@ -176,6 +176,15 @@ class BenchManifest {
   final int numClasses;
   final List<BenchModel> models;
   final List<BenchSample> samples;
+
+  /// Smallest input first, then int8 weights before FP16: the order of
+  /// least compute and memory.
+  List<BenchModel> get lightestFirst => [...models]
+    ..sort((a, b) {
+      final bySize = a.inputSize.compareTo(b.inputSize);
+      if (bySize != 0) return bySize;
+      return (a.weights == 'w8' ? 0 : 1).compareTo(b.weights == 'w8' ? 0 : 1);
+    });
 }
 
 /// An unzipped benchmark package: the folder holding `bench_manifest.json`.
@@ -701,6 +710,7 @@ class BenchmarkRunner {
     final cached = _compiled[model.name];
     if (cached != null) return (cached, null);
     final dest = p.join(package.root.path, 'compiled', '${model.name}.mlmodelc');
+    _log('${model.name}: compiling...');
     final r = await bench.compile(package.resolve(model.path), dest);
     _compiled[model.name] = r.compiledPath;
     _log('${model.name}: compiled in ${(r.compileMs / 1000).toStringAsFixed(1)} s');
@@ -716,8 +726,10 @@ class BenchmarkRunner {
     int warmup = 3,
     int iterations = 30,
     bool Function()? shouldStop,
+    bool readPlan = true,
   }) async {
     final arm = ArmResult(model: model.name, units: units, windowsPerPhoto: model.windowsPerPhoto);
+    final tag = '${model.name}/${units.name}';
     final samples = package.manifest.samples;
     int? handle;
     void track(int? bytes) {
@@ -730,14 +742,21 @@ class BenchmarkRunner {
       arm.thermalStart = await thermal.current();
       final (compiled, compileMs) = await _compile(model);
       arm.compileMs = compileMs;
-      try {
-        arm.plan = await bench.computePlan(compiled, units);
-      } catch (error) {
-        _log('${model.name}/${units.name}: no compute plan ($error)');
-        arm.plan = const ComputePlanSummary(available: false);
+      // The compute plan loads the model a second time; skippable to spare memory.
+      if (readPlan) {
+        _log('$tag: reading compute plan...');
+        try {
+          arm.plan = await bench.computePlan(compiled, units);
+        } catch (error) {
+          _log('$tag: no compute plan ($error)');
+          arm.plan = const ComputePlanSummary(available: false);
+        }
       }
       arm.footprintBeforeBytes = await bench.footprintBytes();
       track(arm.footprintBeforeBytes);
+      // Each step is logged before it starts, so after a crash the last line of
+      // log.txt names the step that died.
+      _log('$tag: loading...');
       final loaded = await bench.load(compiled, units);
       handle = loaded.handle;
       arm.loadMs = loaded.loadMs;
@@ -746,6 +765,7 @@ class BenchmarkRunner {
       track(arm.footprintAfterLoadBytes);
 
       final warm = math.max(warmup, samples.length);
+      _log('$tag: loaded in ${(loaded.loadMs / 1000).toStringAsFixed(1)} s; $warm warm-up runs...');
       for (var i = 0; i < warm && !stop(); i++) {
         final sample = samples[i % samples.length];
         final input = package.resolve(sample.inputFor(model.inputSize));
@@ -772,6 +792,7 @@ class BenchmarkRunner {
           track(r.peakFootprintBytes);
         }
       }
+      _log('$tag: $iterations timed runs...');
       for (var i = 0; i < iterations && !stop(); i++) {
         final sample = samples[(warm + i) % samples.length];
         final r = await bench.predict(handle, package.resolve(sample.inputFor(model.inputSize)));
@@ -802,10 +823,24 @@ class BenchmarkRunner {
     return arm;
   }
 
-  /// Every model on every one of [units], model by model. Before each arm
-  /// the phone is let cool to [coolTo] (up to [maxCoolDown]), so later arms
-  /// aren't timed heat-soaked; [onArm] fires after each one, so the caller
-  /// can save results as they come in.
+  /// The quick test, the least strain on the phone: the lightest model
+  /// ([BenchManifest.lightestFirst]) on CPU + Neural Engine, no compute plan,
+  /// 10 timed runs. It answers whether the phone can run the model at all,
+  /// and how fast at its cheapest, before the full matrix is attempted.
+  Future<ArmResult> runQuick({bool Function()? shouldStop}) => runArm(
+    package.manifest.lightestFirst.first,
+    ComputeUnits.cpuAndNeuralEngine,
+    warmup: 3,
+    iterations: 10,
+    shouldStop: shouldStop,
+    readPlan: false,
+  );
+
+  /// Every model on every one of [units], lightest model first, so a crash
+  /// on a heavy model still leaves results for the light ones. Before each
+  /// arm the phone is let cool to [coolTo] (up to [maxCoolDown]), so later
+  /// arms aren't timed heat-soaked; [onArm] fires after each one, so the
+  /// caller can save results as they come in.
   Future<List<ArmResult>> runMatrix({
     List<ComputeUnits> units = const [ComputeUnits.cpuAndNeuralEngine, ComputeUnits.all, ComputeUnits.cpuAndGpu],
     int warmup = 3,
@@ -817,7 +852,7 @@ class BenchmarkRunner {
     Future<void> Function(ArmResult arm)? onArm,
   }) async {
     final arms = <ArmResult>[];
-    for (final model in package.manifest.models) {
+    for (final model in package.manifest.lightestFirst) {
       for (final u in units) {
         if (shouldStop?.call() ?? false) return arms;
         await _coolDown(coolTo, maxCoolDown, coolPoll, shouldStop);
