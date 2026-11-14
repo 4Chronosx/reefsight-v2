@@ -95,6 +95,13 @@ dependencies:
   image_picker: ^1.2.3
   file_picker: ^11.0.3
 
+  # Issue #7 (laptop analysis): the station package for the laptop notebook
+  # is one .zip (manifest + photos), streamed from disk so a station's
+  # photos never sit in memory. Already resolved in pubspec.lock as a
+  # transitive dependency of `image` at this version -- promoted, not newly
+  # added.
+  archive: ^4.3.0
+
 # Local fork of ultralytics_yolo (sub-plan 3 step 1, "Recording/inference
 # isolation"): the published plugin's VideoCapture owns the only
 # AVCaptureSession and exposes no recording API. This override patches in an

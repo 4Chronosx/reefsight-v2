@@ -126,6 +126,10 @@ In order of value and feasibility:
      Caveats: Red Sea training data; 39 grouped classes, not the dataset's 95, with no soft-coral,
      encrusting, foliose, Porites or Heliopora class and bleached variants for only some forms (mapping
      in section 7); and CC BY-SA 4.0 share-alike terms.
+   - **Laptop route built (#7, November 14, 2026).** The station screen exports a zip (photos, corners,
+     the 10 points per frame); notebook `28_coralscapes_laptop_cover.ipynb` labels each point with the
+     pinned model and writes `results.json`; the app imports it, records `analyzed_on = laptop` and
+     rebuilds cover. Format and checks: `docs/laptop-analysis-exchange-format.md`.
    - **Caveat:** the segmenter's "coral" class isn't the bulletin's "hard coral". It may include soft coral and dead coral. It will need checking, and possibly retraining, to separate live hard coral.
 2. **More benthic classes.** Retrain Stage B to separate live hard coral, soft coral, dead coral, algae, sand and rubble. CoralscapesV2, already used in training, has fine-grained labels that may support this.
 3. **Life-forms first, then TAUs.** Automatic genus naming already failed across domains, so start with growth forms (branching, massive, encrusting, foliose, plate) and the bulletin's priority units (Porites ×3, Acropora, Heliopora). For full TAU diversity, use **expert review**: the app already saves a photo per colony, so a reviewer can tag each one with a TAU and the app counts the TAUs present. That gives the bulletin's diversity category without claiming the model can identify genera.

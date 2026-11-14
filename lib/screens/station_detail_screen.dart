@@ -1,8 +1,14 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../constants/app_colors.dart';
 import '../services/app_database.dart';
 import '../services/geo_fix.dart';
+import '../services/laptop_analysis.dart';
+import '../services/transect_cover.dart';
 import '../services/report_data.dart';
 import '../services/session_files.dart';
 import '../services/session_summary.dart';
@@ -33,6 +39,8 @@ class StationDetailScreen extends StatefulWidget {
     this.deleteFiles = deleteSessionFilesInDocuments,
     this.buildTransectSetup,
     this.buildCapture,
+    this.exportForAnalysis,
+    this.pickResultsFile,
   });
 
   /// Named so Live's end handoff can return a station transect's Summary
@@ -59,12 +67,21 @@ class StationDetailScreen extends StatefulWidget {
   /// Injected in tests, which have no camera.
   final Widget Function(CaptureStart start)? buildCapture;
 
+  /// Issue #7: packs the station for the laptop notebook and opens the
+  /// share sheet; `null` uses [LaptopAnalysis] with the app's directories.
+  /// Injected in tests, which have no share sheet.
+  final Future<void> Function(int stationId)? exportForAnalysis;
+
+  /// Issue #7: the text of the results file the diver picks, or `null` when
+  /// they cancel; `null` uses the Files picker. Injected in tests.
+  final Future<String?> Function()? pickResultsFile;
+
   @override
   State<StationDetailScreen> createState() => _StationDetailScreenState();
 }
 
 class _StationData {
-  const _StationData(this.station, this.transects, [this.colonyResults = const {}]);
+  const _StationData(this.station, this.transects, [this.colonyResults = const {}, this.cover = const {}]);
 
   final Station? station;
   final List<TransectSession> transects;
@@ -72,6 +89,47 @@ class _StationData {
   /// Issue #3: each colony-count transect's own counts, by session id.
   /// Empty for photo and preliminary stations.
   final Map<int, SessionSummary> colonyResults;
+
+  /// Issue #7: each transect's cached cover rows, by session id. Empty for
+  /// colony-count stations.
+  final Map<int, List<TransectCoverRow>> cover;
+}
+
+/// `StateError`'s and `ArgumentError`'s own message, without the
+/// "Bad state:" / "Invalid argument(s):" prefix.
+String _reason(Object error) => switch (error) {
+      StateError(:final message) => message,
+      ArgumentError(:final message) => '$message',
+      FormatException(:final message) => message,
+      _ => '$error',
+    };
+
+Future<void> _exportWithLaptopAnalysis(int stationId, DatabaseOpener openDatabase) async {
+  final db = await openDatabase();
+  final AnalysisExport export;
+  try {
+    export = await LaptopAnalysis.exportStation(
+      db,
+      stationId,
+      documentsPath: (await getApplicationDocumentsDirectory()).path,
+      outputDirectory: await getTemporaryDirectory(),
+    );
+  } finally {
+    await db.close();
+  }
+  await LaptopAnalysis.share(export.zipPath);
+}
+
+/// `FileType.custom` goes through the Files app on iOS (`photo_source.dart`).
+Future<String?> _pickResultsFromFiles() async {
+  final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: const ['json']);
+  final path = result?.files.singleOrNull?.path;
+  if (path == null) return null;
+  final file = File(path);
+  if (await file.length() > LaptopAnalysis.maxResultsBytes) {
+    throw const FormatException('This file is far too large to be a ReefSight results file');
+  }
+  return file.readAsString();
 }
 
 class _StationDetailScreenState extends State<StationDetailScreen> with RouteAware {
@@ -102,10 +160,14 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
       final station = await db.stationById(widget.stationId);
       final transects =
           station == null ? const <TransectSession>[] : await db.transectsForStation(widget.stationId);
-      final results = station?.surveyType == SurveyType.colonyCount
-          ? await db.colonyResultsForStation(widget.stationId)
-          : const <int, SessionSummary>{};
-      return _StationData(station, transects, results);
+      final colonyCount = station?.surveyType == SurveyType.colonyCount;
+      final results =
+          colonyCount ? await db.colonyResultsForStation(widget.stationId) : const <int, SessionSummary>{};
+      final cover = <int, List<TransectCoverRow>>{
+        if (!colonyCount)
+          for (final t in transects) t.id!: await db.coverForSession(t.id!),
+      };
+      return _StationData(station, transects, results, cover);
     } finally {
       await db.close();
     }
@@ -145,6 +207,60 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
             : (widget.buildCapture ?? _defaultCapture)(
                 CaptureStart(station: station, sessionId: t.id!, transectNumber: t.transectNumber ?? 0),
               ),
+      );
+
+  bool _analysisBusy = false;
+
+  Future<void> _exportForAnalysis(Station station) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _analysisBusy = true);
+    try {
+      final export = widget.exportForAnalysis ?? (id) => _exportWithLaptopAnalysis(id, widget.openDatabase);
+      await export(station.id!);
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text('Export failed: ${_reason(error)}')));
+    } finally {
+      if (mounted) setState(() => _analysisBusy = false);
+      _reload();
+    }
+  }
+
+  Future<void> _importResults() async {
+    // Busy before the picker opens, so a second tap can't open another.
+    setState(() => _analysisBusy = true);
+    String title;
+    String message;
+    try {
+      final text = await (widget.pickResultsFile ?? _pickResultsFromFiles)();
+      if (text == null) return;
+      final db = await widget.openDatabase();
+      try {
+        message = describeImport(await LaptopAnalysis.importResults(db, text, stationId: widget.stationId));
+        title = 'Results imported';
+      } finally {
+        await db.close();
+      }
+    } on FormatException catch (error) {
+      (title, message) = ('Results not imported', _reason(error));
+    } on ArgumentError catch (error) {
+      (title, message) = ('Results not imported', "They don't match this phone's transects: ${_reason(error)}");
+    } catch (error) {
+      (title, message) = ('Results not imported', 'Something went wrong: ${_reason(error)}');
+    } finally {
+      if (mounted) setState(() => _analysisBusy = false);
+    }
+    if (!mounted) return;
+    _reload();
+    await _showAnalysisDialog(title, message);
+  }
+
+  Future<void> _showAnalysisDialog(String title, String message) => showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK'))],
+        ),
       );
 
   Future<void> _deleteTransect(TransectSession t) async {
@@ -249,6 +365,7 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                           status: transectStatus(t, station.surveyType),
                           flags: transectFlags(t),
                           colonyResults: data.colonyResults[t.id],
+                          coverLine: transectCoverLine(data.cover[t.id] ?? const [], t.analyzedOn),
                           onTap: () => _openTransect(station, t),
                           onLongPress: () => _deleteTransect(t),
                         ),
@@ -260,6 +377,44 @@ class _StationDetailScreenState extends State<StationDetailScreen> with RouteAwa
                     ],
                   ),
                 ),
+                // Issue #7: the cover segmenter runs on a laptop until the
+                // phone bridge (#12). Preliminary frames get points with #13.
+                if (station.surveyType == SurveyType.photoTransect) ...[
+                  const SizedBox(height: 16),
+                  SectionCard(
+                    icon: Icons.laptop_outlined,
+                    title: 'Cover analysis (laptop)',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            'Export the photos and their 10 points per frame, run the Coralscapes '
+                            'notebook on a laptop, then import its results.json here.',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _analysisBusy ? null : () => _exportForAnalysis(station),
+                          icon: const Icon(Icons.ios_share),
+                          label: const Text('Export for laptop analysis'),
+                        ),
+                        const SizedBox(height: 8),
+                        OutlinedButton.icon(
+                          onPressed: _analysisBusy ? null : _importResults,
+                          icon: const Icon(Icons.download_outlined),
+                          label: const Text('Import analysis results'),
+                        ),
+                        if (_analysisBusy)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: LinearProgressIndicator(),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 // Issue #3: colony count has no station cover summary -- its
                 // results stay per transect (alignment doc §10).
@@ -355,6 +510,7 @@ class _TransectRow extends StatelessWidget {
     required this.status,
     required this.flags,
     this.colonyResults,
+    this.coverLine,
     required this.onTap,
     required this.onLongPress,
   });
@@ -362,6 +518,9 @@ class _TransectRow extends StatelessWidget {
   final TransectSession transect;
   final String status;
   final List<String> flags;
+
+  /// Issue #7: `transectCoverLine`, or `null` while there is no cover.
+  final String? coverLine;
 
   /// Issue #3: a colony-count transect's own counts; `null` otherwise.
   final SessionSummary? colonyResults;
@@ -415,6 +574,10 @@ class _TransectRow extends StatelessWidget {
               if (_resultsLine case final results?) ...[
                 const SizedBox(height: 4),
                 Text(results, style: const TextStyle(fontSize: 13)),
+              ],
+              if (coverLine case final cover?) ...[
+                const SizedBox(height: 4),
+                Text(cover, style: const TextStyle(fontSize: 13)),
               ],
               for (final flag in flags) ...[
                 const SizedBox(height: 4),

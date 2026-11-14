@@ -84,7 +84,13 @@ any non-trivial architecture decision.
   mapping seeded under its exact 40 labels, a TB code catalogue, seeded points (Mulberry32, 10 per frame
   inside the 1 × 1 m area), % cover per code and major category with BLEC, schema v12 (`level` in the
   cover key), and every point or label change dropping the cached cover.
-- **Next: #7**, laptop analysis with the Coralscapes segmenter and results import.
+- **#7 Laptop analysis and results import** (`sub-plans/26-laptop-analysis.md`):
+  **done 2026-11-14** (tests; notebook written but not yet run; device check pending). A station
+  exports one zip (manifest with each frame's corners and points, plus photos). Notebook 28 runs the
+  pinned CoralscapesV2 SegFormer and labels each point. The app imports `results.json` in one
+  transaction (stale frames skipped, mismatches rejected), records `analyzed_on = laptop`, rebuilds
+  cover, and shows a cover line on each transect. Format: `../docs/laptop-analysis-exchange-format.md`.
+- **Next: #8**, station summary, grading and CPCe-layout export.
 
 ## Explicitly out of scope for now
 

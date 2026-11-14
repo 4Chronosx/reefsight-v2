@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -19,6 +20,7 @@ import 'package:reefsight_mobile/services/station.dart';
 import 'package:reefsight_mobile/services/station_checks.dart';
 import 'package:reefsight_mobile/services/tracked_colony_record.dart';
 import 'package:reefsight_mobile/services/transect_database.dart';
+import 'package:reefsight_mobile/services/transect_frame.dart';
 import 'package:reefsight_mobile/services/transect_placement.dart';
 import 'package:reefsight_mobile/services/transect_session.dart';
 
@@ -515,6 +517,158 @@ void main() {
       expect(find.text('Results hidden — recount pending'), findsOneWidget);
       expect(find.text(kColonyCountNoStationSummary), findsOneWidget);
       expect(find.textContaining('coming with #8'), findsNothing);
+    });
+
+    group('laptop analysis (#7)', () {
+      const corners = [(x: 0.1, y: 0.1), (x: 0.9, y: 0.1), (x: 0.9, y: 0.9), (x: 0.1, y: 0.9)];
+
+      /// A photo transect with one framed photo, sampled; returns the results
+      /// file the notebook would send, with 3 of the 10 points on coral.
+      Future<({int session, String results})> framedTransect(TransectDatabase db, int stationId) async {
+        final session = await db.insertSession(_transect(stationId, 1).copyWith(pointsPerFrame: 10));
+        final frame = await db.insertFrame(TransectFrame(
+          sessionId: session,
+          meterMark: 0,
+          imagePath: 'photo_transects/$session/m0.jpg',
+          source: FrameSource.inApp,
+          corners: corners,
+          cornerSource: CornerSource.manual,
+        ));
+        await db.ensureFramePoints(session);
+        final points = await db.pointsForFrame(frame);
+        final results = jsonEncode({
+          'format': 'reefsight-analysis-results',
+          'version': 1,
+          'model_id': 'coralscapesv2-segformer-b5',
+          'transects': [
+            {
+              'session_id': session,
+              'point_seed': (await db.sessionById(session))!.pointSeed,
+              'frames': [
+                {
+                  'frame_id': frame,
+                  'corners': [for (final c in corners) [c.x, c.y]],
+                  'points': [
+                    for (final pt in points)
+                      {'point_id': pt.id, 'model_class': pt.pointIndex < 3 ? 'branching alive' : 'sand'},
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+        return (session: session, results: results);
+      }
+
+      testWidgets('import labels the points and the transect shows its cover', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        final t = await framedTransect(db, id);
+
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            pickResultsFile: () async => t.results,
+          ),
+        ));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('HC '), findsNothing);
+
+        await tester.tap(find.text('Import analysis results'));
+        await tester.pumpAndSettle();
+        expect(find.text('10 points labeled in 1 transect.'), findsOneWidget);
+        await tester.tap(find.text('OK'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('HC 30.0% · Bleached 0.0% · 10 points · laptop'), findsOneWidget);
+        expect(find.text('Analysis done'), findsOneWidget);
+      });
+
+      testWidgets('a results file that does not match is refused, with the reason', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await framedTransect(db, id);
+
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            pickResultsFile: () async => '{"format": "reefsight-analysis"}',
+          ),
+        ));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Import analysis results'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Results not imported'), findsOneWidget);
+        expect(find.textContaining('exported manifest'), findsOneWidget);
+      });
+
+      testWidgets('cancelling the picker does nothing', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(stationId: id, openDatabase: () async => db, pickResultsFile: () async => null),
+        ));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Import analysis results'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsNothing);
+      });
+
+      testWidgets('export hands the station to the exporter', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        final exported = <int>[];
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            exportForAnalysis: (stationId) async => exported.add(stationId),
+          ),
+        ));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Export for laptop analysis'));
+        await tester.pumpAndSettle();
+        expect(exported, [id]);
+      });
+
+      testWidgets('an export that fails says why', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        final id = await db.insertStation(_station());
+        await tester.pumpWidget(MaterialApp(
+          home: StationDetailScreen(
+            stationId: id,
+            openDatabase: () async => db,
+            exportForAnalysis: (_) async => throw StateError('Nothing to analyze yet'),
+          ),
+        ));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Export for laptop analysis'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Nothing to analyze yet'), findsOneWidget);
+      });
+
+      testWidgets('colony-count and preliminary stations have no laptop analysis', (tester) async {
+        _useTallSurface(tester);
+        final db = await _db();
+        for (final type in [SurveyType.colonyCount, SurveyType.preliminaryVideo]) {
+          final id = await db.insertStation(_station(type: type));
+          await tester.pumpWidget(MaterialApp(
+            key: ValueKey(type),
+            home: StationDetailScreen(stationId: id, openDatabase: () async => db),
+          ));
+          await tester.pumpAndSettle();
+          expect(find.text('Export for laptop analysis'), findsNothing, reason: type.db);
+          expect(find.text('Import analysis results'), findsNothing, reason: type.db);
+        }
+      });
     });
 
     testWidgets('photo stations keep the #8 placeholder and no research label', (tester) async {

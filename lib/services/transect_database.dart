@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import 'analysis_manifest.dart';
 import 'category_mapping.dart';
 import 'coralscapes_mapping.dart';
 import 'cover_calculator.dart';
@@ -1278,19 +1279,181 @@ class TransectDatabase {
   /// Throws [ArgumentError] for a colony-count transect (#3).
   Future<CoverComputation> refreshTransectCover(int sessionId) async {
     await _rejectColonyCount(sessionId, 'cover');
+    return _db.transaction((txn) => _refreshCover(txn, sessionId));
+  }
+
+  static Future<CoverComputation> _refreshCover(Transaction txn, int sessionId) async {
+    final frames = (await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]))
+        .map(TransectFrame.fromMap)
+        .toList(growable: false);
+    final cover = computeCover(sessionId, frames, await _pointsOfSession(txn, sessionId));
+    await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+    final batch = txn.batch();
+    for (final row in cover.rows) {
+      batch.insert(_coverTable, row.toMap());
+    }
+    await batch.commit(noResult: true);
+    return cover;
+  }
+
+  /// Issue #7: writes a laptop results file (`analysis_manifest.dart`) into
+  /// this phone's transects, all in one transaction -- the whole file goes in
+  /// or none of it does. For each transect it:
+  ///
+  /// - checks the transect exists, isn't colony count (#3), and still has
+  ///   the `point_seed` the export used;
+  /// - skips a frame whose corners have changed since the export as
+  ///   **stale** (moving corners resamples its points, `updateFrameCorners`),
+  ///   leaving its points unlabeled;
+  /// - checks every other frame and point belongs where the file says, and
+  ///   that every class is in [AnalysisResults.modelId]'s `category_map`;
+  /// - writes the labels as [setPointModelLabel] does (expert corrections
+  ///   stay), sets `model_id`, [analyzedOn] and [at], rebuilds cover, and
+  ///   marks the analysis `done` -- or `pending` while any point of the
+  ///   transect is still unlabeled.
+  ///
+  /// With [stationId], every transect in the file must belong to that
+  /// station, so a results file picked on the wrong station's screen is
+  /// refused rather than written into another station's transects.
+  ///
+  /// Throws [ArgumentError] on the first check that fails, having written
+  /// nothing.
+  Future<List<AnalysisImport>> applyAnalysisResults(
+    AnalysisResults results, {
+    AnalyzedOn analyzedOn = AnalyzedOn.laptop,
+    required DateTime at,
+    int? stationId,
+  }) async {
+    for (final t in results.transects) {
+      await _rejectColonyCount(t.sessionId, 'cover analysis');
+    }
     return _db.transaction((txn) async {
-      final frames = (await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]))
-          .map(TransectFrame.fromMap)
-          .toList(growable: false);
-      final cover = computeCover(sessionId, frames, await _pointsOfSession(txn, sessionId));
-      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
-      final batch = txn.batch();
-      for (final row in cover.rows) {
-        batch.insert(_coverTable, row.toMap());
+      final classes = {
+        for (final r in await txn.query(_categoryMapTable, where: 'model_id = ?', whereArgs: [results.modelId]))
+          r['model_class'] as String: r['category_code'] as String,
+      };
+      if (classes.isEmpty) throw ArgumentError('No category map for model ${results.modelId}');
+
+      final imports = <AnalysisImport>[];
+      for (final t in results.transects) {
+        final sessions = await txn.query(_sessionsTable,
+            columns: ['point_seed', 'station_id'], where: 'id = ?', whereArgs: [t.sessionId]);
+        if (sessions.isEmpty) throw ArgumentError('Transect ${t.sessionId} is not on this phone');
+        if (stationId != null && sessions.single['station_id'] != stationId) {
+          throw ArgumentError('This file is for another station (transect ${t.sessionId})');
+        }
+        if (sessions.single['point_seed'] != t.pointSeed) {
+          throw ArgumentError('Transect ${t.sessionId} was sampled with a different seed than this file');
+        }
+        final frames = {
+          for (final r in await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [t.sessionId]))
+            r['id'] as int: TransectFrame.fromMap(r),
+        };
+        final pointsByFrame = <int, Set<int>>{};
+        for (final r in await txn.rawQuery('''
+          SELECT p.id AS id, p.frame_id AS frame_id FROM $_pointsTable p
+          JOIN $_framesTable f ON f.id = p.frame_id WHERE f.session_id = ?
+        ''', [t.sessionId])) {
+          (pointsByFrame[r['frame_id'] as int] ??= {}).add(r['id'] as int);
+        }
+
+        final stale = <int>[];
+        var labeled = 0;
+        final batch = txn.batch();
+        for (final f in t.frames) {
+          final frame = frames[f.frameId];
+          if (frame == null) {
+            // Retaken (`replaceFrameAtMeter` gives a new id) or deleted since
+            // the export: stale. A frame of another transect is a mixed-up file.
+            if (await _exists(txn, _framesTable, f.frameId)) {
+              throw ArgumentError('Frame ${f.frameId} is not part of transect ${t.sessionId}');
+            }
+            stale.add(f.frameId);
+            continue;
+          }
+          final current = pointsByFrame[f.frameId] ?? const <int>{};
+          // Moved corners resample the points (`updateFrameCorners`): stale,
+          // even when moved back, since the resampled points have new ids.
+          if (!_sameCorners(frame.corners, f.corners) || f.points.any((pt) => !current.contains(pt.pointId))) {
+            for (final pt in f.points) {
+              if (!current.contains(pt.pointId) && await _exists(txn, _pointsTable, pt.pointId)) {
+                throw ArgumentError('Point ${pt.pointId} is not part of frame ${f.frameId}');
+              }
+            }
+            stale.add(f.frameId);
+            continue;
+          }
+          for (final pt in f.points) {
+            final code = classes[pt.modelClass];
+            if (code == null) {
+              final cls = pt.modelClass.length > 60 ? '${pt.modelClass.substring(0, 60)}…' : pt.modelClass;
+              throw ArgumentError('"$cls" is not a ${results.modelId} class');
+            }
+            batch.update(
+              _pointsTable,
+              {'model_class': pt.modelClass, 'model_confidence': pt.confidence, 'category_code': code},
+              where: 'id = ?',
+              whereArgs: [pt.pointId],
+            );
+            labeled++;
+          }
+        }
+        await batch.commit(noResult: true);
+        var cover = await _refreshCover(txn, t.sessionId);
+        // `computeCover` only sees frames that have points: a frame whose
+        // points were deleted (corners moved) and not resampled, or one added
+        // after the export, would otherwise leave a "complete" cover over
+        // fewer frames than the transect has.
+        final unsampled = frames.values.any((fr) =>
+            !fr.excluded && fr.imagePath.isNotEmpty && fr.corners != null && !pointsByFrame.containsKey(fr.id));
+        final complete = cover.isComplete && stale.isEmpty && !unsampled;
+        if (cover.isComplete && !complete) {
+          await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [t.sessionId]);
+          cover = CoverComputation(
+            rows: const [],
+            framesScored: cover.framesScored,
+            allPoints: cover.allPoints,
+            excludedPoints: cover.excludedPoints,
+            unlabeledPoints: cover.unlabeledPoints,
+          );
+        }
+        // Nothing labeled (every frame stale): the transect wasn't analyzed.
+        if (labeled > 0) {
+          await txn.update(
+            _sessionsTable,
+            {
+              'analysis_status': (complete ? AnalysisStatus.done : AnalysisStatus.pending).db,
+              'model_id': results.modelId,
+              'analyzed_on': analyzedOn.db,
+              'analyzed_at': at.toUtc().toIso8601String(),
+            },
+            where: 'id = ?',
+            whereArgs: [t.sessionId],
+          );
+        }
+        imports.add(AnalysisImport(
+          sessionId: t.sessionId,
+          pointsLabeled: labeled,
+          staleFrameIds: stale,
+          cover: cover,
+          complete: complete,
+        ));
       }
-      await batch.commit(noResult: true);
-      return cover;
+      return imports;
     });
+  }
+
+  static Future<bool> _exists(Transaction txn, String table, int id) async =>
+      (await txn.query(table, columns: ['id'], where: 'id = ?', whereArgs: [id])).isNotEmpty;
+
+  /// Exact: the notebook echoes the corners it was sent, and JSON carries a
+  /// double's shortest round-trip form both ways (Dart and Python).
+  static bool _sameCorners(List<NormPoint>? stored, List<NormPoint> sent) {
+    if (stored == null || stored.length != sent.length) return false;
+    for (var i = 0; i < sent.length; i++) {
+      if (stored[i].x != sent[i].x || stored[i].y != sent[i].y) return false;
+    }
+    return true;
   }
 
   /// Inserts or replaces mappings by `(model_id, model_class)`, in one

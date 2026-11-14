@@ -1,4 +1,5 @@
 import 'station.dart';
+import 'transect_cover.dart';
 import 'transect_session.dart';
 
 /// Issue #2: the TB 2019-04 checks and display rules the station screens
@@ -25,6 +26,24 @@ bool reportsBulletinCover(SurveyType type) => switch (type) {
       SurveyType.photoTransect || SurveyType.preliminaryVideo => true,
       SurveyType.colonyCount => false,
     };
+
+/// Issue #7: the cover line on a transect's tile, e.g. "HC 31.0% ·
+/// Bleached 4.0% · 500 points · laptop", from its cached `transect_cover`
+/// rows. `null` while there is no cover (not analyzed, or not every point
+/// labeled). The station mean, SD, SE and grade are #8's.
+String? transectCoverLine(List<TransectCoverRow> rows, AnalyzedOn? analyzedOn) {
+  TransectCoverRow? find(CoverLevel level, String code) =>
+      rows.where((r) => r.level == level && r.categoryCode == code).firstOrNull;
+  final hc = find(CoverLevel.major, 'HC');
+  if (hc == null) return null;
+  final bleached = find(CoverLevel.code, 'BLEC');
+  return [
+    'HC ${hc.percent.toStringAsFixed(1)}%',
+    if (bleached != null) 'Bleached ${bleached.percent.toStringAsFixed(1)}%',
+    '${hc.totalPoints} points',
+    if (analyzedOn != null) analyzedOn.db,
+  ].join(' · ');
+}
 
 /// Issue #3: the label on every colony-count station, report and export.
 const kResearchScopeNote = 'Research survey, outside DENR-BMB TB 2019-04 and TB 2017-05';
