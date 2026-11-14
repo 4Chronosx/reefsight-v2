@@ -309,13 +309,16 @@ own mapping. The draft mapping for the 39-class CoralscapesV2 model is in
 | excluded | INTEGER NOT NULL | 1 means not counted, like tape and shadow |
 
 ### `transect_cover` (new)
-Cached % cover per transect and category, recomputed whenever points change. The station summary is
-calculated from these rows, not stored.
+Cached % cover per transect, level and category. Every change to a transect's points, labels, frames or
+corners drops its rows, and they are rebuilt from the points (`refreshTransectCover`, #6). The station
+summary is calculated from these rows, not stored. **Schema v12 (#6)** added `level` to the key: DC and AA
+are both TB codes and major categories, so without it one transect couldn't hold both.
 
 | Column | Type | Meaning |
 |---|---|---|
 | session_id | INTEGER PK FK | `transect_sessions.id` |
-| category_code | TEXT PK | A TB code or a major category |
+| level | TEXT PK | `code` (a TB 2017-05 code) · `major` (HC, DC, AA, OB, AB) |
+| category_code | TEXT PK | A TB code, or a major category; BLEC and every major are always present |
 | points | INTEGER NOT NULL | Points in this category |
 | total_points | INTEGER NOT NULL | Points counted, after exclusions |
 | percent | REAL NOT NULL | points ÷ total_points × 100 |

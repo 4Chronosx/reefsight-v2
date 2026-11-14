@@ -84,7 +84,7 @@ void main() {
 
       final raw = await openDatabase(p.join(dir.path, 'reefsight.db'), singleInstance: false);
       addTearDown(raw.close);
-      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 11);
+      expect((await raw.rawQuery('PRAGMA user_version')).single.values.single, 12);
       expect(await _tableNames(raw), containsAll(_v11Tables));
       expect(await _tableNames(raw), isNot(contains('genus_tags')));
       expect(await _tableNames(raw), isNot(contains('drive_uploads')));

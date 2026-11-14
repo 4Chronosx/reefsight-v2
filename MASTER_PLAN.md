@@ -79,7 +79,12 @@ any non-trivial architecture decision.
   imported-frame station's transect (copied, never moved), ordered by EXIF time with a filename
   fallback, reorder/remove/gaps, 5 MP / count / fisheye checks, camera and time saved per frame;
   a shared corner editor (drag, copy previous, no frame visible) for imported and in-app photos.
-- **Next: #6**, category mapping, point sampling and transect cover.
+- **#6 Category mapping, point sampling and transect cover** (`sub-plans/25-category-mapping-and-cover.md`):
+  **done 2026-11-14** (tests; mapping is a draft pending CCEF review). The CoralscapesV2 → TB 2017-05
+  mapping seeded under its exact 40 labels, a TB code catalogue, seeded points (Mulberry32, 10 per frame
+  inside the 1 × 1 m area), % cover per code and major category with BLEC, schema v12 (`level` in the
+  cover key), and every point or label change dropping the cached cover.
+- **Next: #7**, laptop analysis with the Coralscapes segmenter and results import.
 
 ## Explicitly out of scope for now
 

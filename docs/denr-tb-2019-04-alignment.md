@@ -142,6 +142,7 @@ In order of value and feasibility:
 - Can they share the CMEMP/Agos data template?
 - Should ReefSight's first bulletin-aligned target be % HCC with categories, with diversity coming later through expert review?
 - Would CCEF accept a validated virtual frame (section 6) in place of the physical tetrapod or monopod? What agreement with the physical frame would they need to see?
+- Is the draft class mapping (section 7) right? In particular: the ReefSight codes ACX and HCX for hard coral of unknown form, "algae covered substrate" as DCA, "dead clam" excluded, unidentified points counted under other biota, and whether macroalgae (MA) and Halimeda (HA) are their own major categories, as on the sample CPCe sheet, or part of algae (AA).
 
 ## 6. Proposed optional feature: frame mode (Physical or Virtual)
 
@@ -254,20 +255,27 @@ an official one and the two can be compared line by line:
 uses **39 classes** (ids 1–39, plus 0 "unlabeled"), **not** the dataset's 95 fine classes. They mix
 growth forms and genera, with alive, bleached and dead variants. Draft mapping (to review with CCEF):
 
-| TB 2017-05 | Model classes |
+| TB 2017-05 | Model classes (exact `id2label` strings) |
 |---|---|
 | ACT | table acropora alive |
-| Acropora (form unspecified) | acropora alive |
+| ACX (Acropora, form unknown; ReefSight code) | acropora alive |
 | CB | branching alive, pocillopora alive, stylophora alive |
 | CM | massive/meandering alive, meandering alive |
 | CME | millepora |
-| HC (form unclear) | other coral alive, turbinaria |
-| BLEC | other coral / massive-meandering / branching / meandering **bleached** |
-| DC | branching / massive-meandering / meandering / table acropora / other coral **dead** |
-| DCA / AA | algae covered substrate |
-| SP, OT | sponge, clam, sea cucumber, sea urchin, anemone, crown of thorn, seagrass |
-| S, R, abiotic | sand, rubble, unknown hard substrate |
-| Excluded (TWB) | transect line, transect tools, human, fish, trash, dark, background, unlabeled, dead clam |
+| HCX (hard coral, form unknown; ReefSight code) | other coral alive, turbinaria |
+| BLEC | other coral / massive/meandering / branching / meandering **bleached** |
+| DC | branching / massive/meandering / meandering / table acropora / other coral **dead** |
+| DCA | algae covered substrate |
+| SP | sponge |
+| OT | other animal, clam, sea cucumber, sea urchin, anemone, crown of thorn, seagrass |
+| S, R, RCK | sand, rubble, unknown hard substrate (RCK: rock, English et al. 1997) |
+| Excluded (TWB) | unlabeled, transect line, transect tools, human, fish, trash, dark, background, dead clam |
+
+**Seeded in the app (#6, November 14, 2026)** as `lib/services/coralscapes_mapping.dart`, under
+model id `coralscapesv2-segformer-b5`. The class strings were re-checked against the model's
+`config.json` (commit `c61183ec`): the earlier draft had paraphrased several of them and left out
+**`other animal`** (id 11), now mapped to OT. Major categories follow the blueprint's six (HC, DC, AA,
+OB, AB, TWB), with BLEC counted under HC. The reasoning is in `docs/cpce-point-sampling-and-cover.md`.
 
 **Gaps against the bulletin:**
 - No soft-coral class. SC probably falls under "other coral", so it can't be reported separately.

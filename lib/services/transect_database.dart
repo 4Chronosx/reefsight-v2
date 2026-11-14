@@ -1,14 +1,20 @@
+import 'dart:math';
+
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 import 'category_mapping.dart';
+import 'coralscapes_mapping.dart';
+import 'cover_calculator.dart';
 import 'db_enum.dart';
 import 'device_checks.dart';
 import 'frame_point.dart';
 import 'geo_fix.dart';
 import 'health_aggregator.dart';
+import 'point_sampler.dart';
 import 'session_summary.dart';
 import 'station.dart';
+import 'tb_categories.dart';
 import 'tracked_colony_record.dart';
 import 'transect_cover.dart';
 import 'transect_frame.dart';
@@ -55,8 +61,13 @@ class TransectDatabase {
   /// added the session's classifier settings (crop style + thresholds).
   /// 10 -> 11 added stations, transect frames, frame points, the category
   /// map and cached transect cover, plus the station/transect columns on
-  /// `transect_sessions` (issue #1, the DENR TB 2019-04 version).
-  static const _schemaVersion = 11;
+  /// `transect_sessions` (issue #1, the DENR TB 2019-04 version). 11 -> 12
+  /// rebuilt the (still empty) cover cache with a `level` column in its key
+  /// (#6). Every create and upgrade also (re)seeds the CoralscapesV2
+  /// category map, so a change to `coralscapes_mapping.dart` ships with a
+  /// version bump -- that runs the re-seed once, inside sqflite's
+  /// version-change transaction, instead of racing on every open.
+  static const _schemaVersion = 12;
 
   /// `singleInstance: false`: every caller (Home, Surveys, Settings, Summary,
   /// Live) opens, queries, then `close()`s its own handle. With sqflite's
@@ -150,7 +161,9 @@ class TransectDatabase {
     for (final sql in _v11ChildTablesSql) {
       await db.execute(sql);
     }
+    await db.execute(_coverTableSql);
     await db.execute(_stationTransectIndexSql);
+    await _seedCategoryMap(db, kCoralscapesModelId, coralscapesMapping());
   }
 
   /// Applies each version bump between [oldVersion] and [_schemaVersion] in
@@ -221,6 +234,13 @@ class TransectDatabase {
       }
       await db.execute(_stationTransectIndexSql);
     }
+    if (oldVersion < 12) {
+      // A cache: nothing was ever computed into the v11 table (#6 is the
+      // first writer), and anything that was is recomputed from the points.
+      await db.execute('DROP TABLE IF EXISTS $_coverTable');
+      await db.execute(_coverTableSql);
+    }
+    await _seedCategoryMap(db, kCoralscapesModelId, coralscapesMapping());
   }
 
   /// v11: a station (TB 2019-04) groups 3-5 transects. The CHECK lists are
@@ -332,18 +352,22 @@ class TransectDatabase {
       PRIMARY KEY (model_id, model_class)
     )
     ''',
-    '''
+  ];
+
+  /// v12 (#6): cached cover per transect, level and category. The level is
+  /// in the key because DC and AA are both TB codes and major categories.
+  static const _coverTableSql = '''
     CREATE TABLE $_coverTable (
       session_id INTEGER NOT NULL REFERENCES $_sessionsTable(id),
+      level TEXT NOT NULL CHECK (level IN ('code', 'major')),
       category_code TEXT NOT NULL,
       points INTEGER NOT NULL,
       total_points INTEGER NOT NULL,
       percent REAL NOT NULL,
       uses_expert INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (session_id, category_code)
+      PRIMARY KEY (session_id, level, category_code)
     )
-    ''',
-  ];
+  ''';
 
   /// v10: the classifier settings a session ran with -- names match
   /// `TransectSession.toMap` and `ClassificationThresholds.toColumns`.
@@ -1017,16 +1041,89 @@ class TransectDatabase {
     return rows.single['session_id'] as int;
   }
 
-  /// Inserts a frame's scoring points in one transaction: all or nothing,
-  /// so a duplicate `(frame_id, point_index)` leaves the frame as it was.
+  /// Inserts scoring points in one transaction: all or nothing, so a
+  /// duplicate `(frame_id, point_index)` leaves the frame as it was. New
+  /// points change what cover counts, so their transects' cached cover goes
+  /// in the same transaction. Throws [ArgumentError] for an unknown frame or
+  /// a code outside the TB catalogue (checked first, as the label setters
+  /// do, so a bad code can't land and later break `refreshTransectCover`).
   Future<void> insertFramePoints(List<FramePoint> points) async {
     if (points.isEmpty) return;
+    for (final point in points) {
+      for (final code in [point.categoryCode, point.expertCategoryCode]) {
+        if (code != null) tbCategory(code);
+      }
+    }
     await _db.transaction((txn) async {
+      final sessions = {for (final frameId in {for (final p in points) p.frameId}) await _sessionOfFrame(txn, frameId)};
       final batch = txn.batch();
       for (final point in points) {
         batch.insert(_pointsTable, point.toMap()..remove('id'));
       }
       await batch.commit(noResult: true);
+      for (final sessionId in sessions) {
+        await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+      }
+    });
+  }
+
+  /// Points per frame when a transect doesn't say (TB 2017-05, CPCe).
+  static const _cpcePointsPerFrame = 10;
+
+  /// Issue #6: places the scoring points on every frame of the transect that
+  /// can be scored and has none yet -- not excluded, with an image and its
+  /// 1 × 1 m corners set -- at the positions `point_sampler.dart` derives
+  /// from the transect's `point_seed` and each frame's meter mark (or video
+  /// time). A transect with no seed yet gets one from [newSeed] (default: a
+  /// secure random 32-bit value), stored first, so every later frame uses
+  /// the same one. Frames that have points keep them: points go only when
+  /// the image or its corners change (`replaceFrameAtMeter`,
+  /// `updateFrameCorners`). Returns how many points were added.
+  ///
+  /// Throws [ArgumentError] for an unknown transect or a colony-count one.
+  Future<int> ensureFramePoints(int sessionId, {int Function()? newSeed}) async {
+    await _rejectColonyCount(sessionId, 'points');
+    return _db.transaction((txn) async {
+      final rows = await txn.query(
+        _sessionsTable,
+        columns: ['point_seed', 'points_per_frame'],
+        where: 'id = ?',
+        whereArgs: [sessionId],
+      );
+      if (rows.isEmpty) throw ArgumentError.value(sessionId, 'sessionId', 'No such transect');
+      var seed = rows.single['point_seed'] as int?;
+      if (seed == null) {
+        seed = (newSeed ?? () => Random.secure().nextInt(1 << 32))() & 0xFFFFFFFF;
+        await txn.update(_sessionsTable, {'point_seed': seed}, where: 'id = ?', whereArgs: [sessionId]);
+      }
+      final perFrame = rows.single['points_per_frame'] as int? ?? _cpcePointsPerFrame;
+
+      final frames = (await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]))
+          .map(TransectFrame.fromMap);
+      final scored = {
+        for (final r in await txn.rawQuery('''
+          SELECT DISTINCT p.frame_id AS id FROM $_pointsTable p
+          JOIN $_framesTable f ON f.id = p.frame_id WHERE f.session_id = ?
+        ''', [sessionId]))
+          r['id'] as int,
+      };
+      final batch = txn.batch();
+      var added = 0;
+      for (final frame in frames) {
+        if (frame.excluded || frame.imagePath.isEmpty || frame.corners == null || scored.contains(frame.id)) continue;
+        final key = frameKey(meterMark: frame.meterMark, videoTimeMs: frame.videoTimeMs);
+        final positions = samplePoints(seed, key, perFrame);
+        for (var i = 0; i < positions.length; i++) {
+          final point = FramePoint(frameId: frame.id!, pointIndex: i, xNorm: positions[i].x, yNorm: positions[i].y);
+          batch.insert(_pointsTable, point.toMap()..remove('id'));
+        }
+        added += positions.length;
+      }
+      if (added > 0) {
+        await batch.commit(noResult: true);
+        await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+      }
+      return added;
     });
   }
 
@@ -1043,8 +1140,10 @@ class TransectDatabase {
   /// Every point of every frame of a transect, in [framesForSession]'s frame
   /// order -- what the cover calculation (#6) reads. Includes excluded
   /// frames' points; the caller drops them with the frame list.
-  Future<List<FramePoint>> pointsForSession(int sessionId) async {
-    final rows = await _db.rawQuery('''
+  Future<List<FramePoint>> pointsForSession(int sessionId) => _pointsOfSession(_db, sessionId);
+
+  static Future<List<FramePoint>> _pointsOfSession(DatabaseExecutor ex, int sessionId) async {
+    final rows = await ex.rawQuery('''
       SELECT p.*
       FROM $_pointsTable p
       JOIN $_framesTable f ON f.id = p.frame_id
@@ -1056,23 +1155,33 @@ class TransectDatabase {
 
   /// Stores the model's answer at a point (#6, #7, #12). Overwrites -- a
   /// re-run of the analysis replaces the previous model's label -- but never
-  /// touches the expert columns.
+  /// touches the expert columns. The transect's cached cover goes in the
+  /// same transaction. Throws [ArgumentError] for an unknown point or a
+  /// [categoryCode] outside the TB catalogue (`tb_categories.dart`).
   Future<void> setPointModelLabel(
     int pointId, {
     required String? modelClass,
     double? confidence,
     String? categoryCode,
   }) async {
-    await _db.update(
-      _pointsTable,
-      {'model_class': modelClass, 'model_confidence': confidence, 'category_code': categoryCode},
-      where: 'id = ?',
-      whereArgs: [pointId],
-    );
+    if (categoryCode != null) tbCategory(categoryCode);
+    await _db.transaction((txn) async {
+      final sessionId = await _sessionOfPoint(txn, pointId);
+      await txn.update(
+        _pointsTable,
+        {'model_class': modelClass, 'model_confidence': confidence, 'category_code': categoryCode},
+        where: 'id = ?',
+        whereArgs: [pointId],
+      );
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+    });
   }
 
   /// A reviewer's correction (#10). The model's label stays as it was, so
-  /// the disagreement is kept for validation (#16) and retraining.
+  /// the disagreement is kept for validation (#16) and retraining. The
+  /// transect's cached cover goes in the same transaction. Throws
+  /// [ArgumentError] for an unknown point, a code outside the TB catalogue,
+  /// or a blank reviewer.
   Future<void> setExpertCategory(
     int pointId,
     String categoryCode, {
@@ -1082,21 +1191,110 @@ class TransectDatabase {
     final code = categoryCode.trim();
     final reviewer = by.trim();
     if (code.isEmpty) throw ArgumentError('categoryCode is required');
+    tbCategory(code);
     if (reviewer.isEmpty) throw ArgumentError('A reviewer name is required');
-    await _db.update(
-      _pointsTable,
-      {
-        'expert_category_code': code,
-        'expert_name': reviewer,
-        'reviewed_at': at.toUtc().toIso8601String(),
-      },
-      where: 'id = ?',
-      whereArgs: [pointId],
+    await _db.transaction((txn) async {
+      final sessionId = await _sessionOfPoint(txn, pointId);
+      await txn.update(
+        _pointsTable,
+        {
+          'expert_category_code': code,
+          'expert_name': reviewer,
+          'reviewed_at': at.toUtc().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [pointId],
+      );
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+    });
+  }
+
+  Future<int> _sessionOfPoint(Transaction txn, int pointId) async {
+    final rows = await txn.rawQuery('''
+      SELECT f.session_id AS id FROM $_pointsTable p JOIN $_framesTable f ON f.id = p.frame_id
+      WHERE p.id = ?
+    ''', [pointId]);
+    if (rows.isEmpty) throw ArgumentError.value(pointId, 'pointId', 'No such point');
+    return rows.single['id'] as int;
+  }
+
+  /// Issue #6: makes [modelId]'s rows in `category_map` exactly [mappings]
+  /// -- rows not listed are removed -- and, if that changed anything,
+  /// re-maps the stored points of that model's transects from their
+  /// `model_class` (a class no longer mapped leaves its point unlabeled) and
+  /// drops their cached cover, all in one transaction. Expert corrections
+  /// are untouched. Returns whether anything changed.
+  ///
+  /// Throws [ArgumentError], before writing, for a row of another model, a
+  /// duplicate class, a code outside the TB catalogue, or a major category
+  /// or excluded flag that disagrees with the code.
+  Future<bool> seedCategoryMap(String modelId, List<CategoryMapping> mappings) =>
+      _db.transaction((txn) => _seedCategoryMap(txn, modelId, mappings));
+
+  static Future<bool> _seedCategoryMap(DatabaseExecutor ex, String modelId, List<CategoryMapping> mappings) async {
+    final classes = <String>{};
+    for (final m in mappings) {
+      if (m.modelId != modelId) throw ArgumentError('Mapping for ${m.modelId} seeded as $modelId');
+      if (!classes.add(m.modelClass)) throw ArgumentError('${m.modelClass} is mapped twice');
+      final category = tbCategory(m.categoryCode);
+      if (m.majorCategory != category.major.db || m.excluded != isExcludedCode(m.categoryCode)) {
+        throw ArgumentError('$m disagrees with the TB catalogue (${category.code} is ${category.major.db})');
+      }
+    }
+    final existing = (await ex.query(_categoryMapTable, where: 'model_id = ?', whereArgs: [modelId]))
+        .map(CategoryMapping.fromMap)
+        .toSet();
+    if (existing.length == mappings.length && existing.containsAll(mappings)) return false;
+
+    await ex.delete(_categoryMapTable, where: 'model_id = ?', whereArgs: [modelId]);
+    final batch = ex.batch();
+    for (final m in mappings) {
+      batch.insert(_categoryMapTable, m.toMap());
+    }
+    await batch.commit(noResult: true);
+    await ex.rawUpdate('''
+      UPDATE $_pointsTable SET category_code = (
+        SELECT m.category_code FROM $_categoryMapTable m
+        WHERE m.model_id = ? AND m.model_class = $_pointsTable.model_class
+      )
+      WHERE model_class IS NOT NULL AND frame_id IN (
+        SELECT f.id FROM $_framesTable f JOIN $_sessionsTable s ON s.id = f.session_id WHERE s.model_id = ?
+      )
+    ''', [modelId, modelId]);
+    await ex.rawDelete(
+      'DELETE FROM $_coverTable WHERE session_id IN (SELECT id FROM $_sessionsTable WHERE model_id = ?)',
+      [modelId],
     );
+    return true;
+  }
+
+  /// Issue #6: works out the transect's % cover from its points
+  /// (`cover_calculator.dart`) and replaces the cached rows with the result,
+  /// in one transaction -- so a label written meanwhile can't leave a stale
+  /// cache behind. An incomplete transect (points not all labeled) ends with
+  /// no cached rows. Returns the whole computation, counts included, for
+  /// screens and the CPCe export (#8).
+  ///
+  /// Throws [ArgumentError] for a colony-count transect (#3).
+  Future<CoverComputation> refreshTransectCover(int sessionId) async {
+    await _rejectColonyCount(sessionId, 'cover');
+    return _db.transaction((txn) async {
+      final frames = (await txn.query(_framesTable, where: 'session_id = ?', whereArgs: [sessionId]))
+          .map(TransectFrame.fromMap)
+          .toList(growable: false);
+      final cover = computeCover(sessionId, frames, await _pointsOfSession(txn, sessionId));
+      await txn.delete(_coverTable, where: 'session_id = ?', whereArgs: [sessionId]);
+      final batch = txn.batch();
+      for (final row in cover.rows) {
+        batch.insert(_coverTable, row.toMap());
+      }
+      await batch.commit(noResult: true);
+      return cover;
+    });
   }
 
   /// Inserts or replaces mappings by `(model_id, model_class)`, in one
-  /// transaction. Seeding the CoralscapesV2 mapping is #6.
+  /// transaction. The app's own mapping goes through [seedCategoryMap].
   Future<void> upsertCategoryMappings(List<CategoryMapping> mappings) async {
     if (mappings.isEmpty) return;
     await _db.transaction((txn) async {
@@ -1145,7 +1343,7 @@ class TransectDatabase {
       _coverTable,
       where: 'session_id = ?',
       whereArgs: [sessionId],
-      orderBy: 'category_code',
+      orderBy: 'level, category_code',
     );
     return rows.map(TransectCoverRow.fromMap).toList(growable: false);
   }
